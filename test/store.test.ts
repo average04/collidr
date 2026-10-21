@@ -545,3 +545,46 @@ describe("delivery and attribution", () => {
     expect(p2.has_more).toBe(false);
   });
 });
+
+describe("session reuse for automatic registration", () => {
+  const WINDOW_MS = 10 * 60_000;
+  const codexSessions = () =>
+    hub.store.db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE participant_id = ?").get(hub.codex.participantId);
+  const again = (overrides: { model?: string; capabilities?: string[] } = {}) =>
+    hub.store.register({
+      participantId: hub.codex.participantId,
+      client: "codex-cli",
+      model: overrides.model ?? "gpt-codex",
+      role: "agent",
+      capabilities: overrides.capabilities,
+      reuseSessionWithinMs: WINDOW_MS,
+    }).session;
+
+  it("resumes a recent session whose client, model, role and capabilities all match", () => {
+    expect(again().id).toBe(hub.codex.sessionId);
+    expect(codexSessions()).toEqual({ n: 1 });
+  });
+
+  it("starts a new session when any snapshot field differs", () => {
+    expect(again({ model: "gpt-codex-next" }).id).not.toBe(hub.codex.sessionId);
+    expect(again({ capabilities: ["run_tests"] }).id).not.toBe(hub.codex.sessionId);
+    expect(codexSessions()).toEqual({ n: 3 });
+  });
+
+  it("starts a new session when the matching one was last seen outside the window", () => {
+    hub.store.db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", hub.codex.sessionId);
+    expect(again().id).not.toBe(hub.codex.sessionId);
+  });
+
+  it("refreshes last_seen_at on the resumed session", () => {
+    hub.store.db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), hub.codex.sessionId);
+    const resumed = again();
+    expect(resumed.id).toBe(hub.codex.sessionId);
+    expect(Date.parse(resumed.last_seen_at)).toBeGreaterThan(Date.now() - 5_000);
+  });
+
+  it("always starts a new session for an explicit register", () => {
+    const { session } = hub.store.register({ participantId: hub.codex.participantId, client: "codex-cli", model: "gpt-codex", role: "agent" });
+    expect(session.id).not.toBe(hub.codex.sessionId);
+  });
+});

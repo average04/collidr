@@ -290,6 +290,18 @@ describe("Claude ↔ Codex review over MCP (acceptance, spec §9)", () => {
     await reviewer.close();
   });
 
+  it("reuses one session across short-lived server processes, unless register is called", async () => {
+    // A client that spawns a fresh `collidr serve` per tool call (as a bridge script might).
+    const first = await connect("per-call", "gpt-codex");
+    const s1 = (await first.call("whoami")).session.id;
+    await first.close();
+    const second = await connect("per-call", "gpt-codex");
+    expect((await second.call("whoami")).session.id).toBe(s1);
+    const explicit = await second.call("register", {});
+    expect(explicit.session.id).not.toBe(s1);
+    await second.close();
+  });
+
   it("cancels a wait cleanly and keeps the server responsive", async () => {
     const a = await connect("canceller", "none");
     const ctl = new AbortController();

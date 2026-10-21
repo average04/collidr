@@ -9,6 +9,8 @@ import { VERSION } from "./version.js";
 
 export const DEFAULT_WAIT_S = 25;
 export const POLL_INTERVAL_MS = 250;
+/** Automatic registration resumes an identical session seen within this window. */
+export const SESSION_REUSE_WINDOW_MS = 10 * 60_000;
 
 export interface ServerOptions {
   /** Participant to resume at startup (normally from COLLIDR_PARTICIPANT). */
@@ -93,6 +95,7 @@ export function createServer(store: Store, opts: ServerOptions = {}): { server: 
     model?: string;
     role?: string;
     capabilities?: string[];
+    reuseSessionWithinMs?: number;
   }) => {
     const participantId = input.participantId ?? opts.participantId;
     if (!participantId) {
@@ -108,15 +111,17 @@ export function createServer(store: Store, opts: ServerOptions = {}): { server: 
       model: input.model ?? opts.model,
       role: input.role ?? opts.role,
       capabilities: input.capabilities ?? opts.capabilities,
+      reuseSessionWithinMs: input.reuseSessionWithinMs,
     });
     actor = { participantId: res.participant.id, sessionId: res.session.id };
     return res;
   };
 
   // Resume lazily on the first tool call when configured, so the session can
-  // record the connecting client's name from the MCP handshake.
+  // record the connecting client's name from the MCP handshake. An identical
+  // recent session is reused, so per-call server processes share one session.
   const me = (): Actor => {
-    if (!actor && opts.participantId) doRegister({});
+    if (!actor && opts.participantId) doRegister({ reuseSessionWithinMs: SESSION_REUSE_WINDOW_MS });
     if (!actor) {
       throw new CollidrError(
         "invalid_argument",

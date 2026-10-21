@@ -113,6 +113,13 @@ export interface RegisterInput {
   model?: string;
   role?: string;
   capabilities?: string[];
+  /**
+   * Resume the participant's latest session with identical client, model, role
+   * and capabilities if it was seen within this many ms, instead of starting a
+   * new one. For automatic registration only, so clients that spawn a server
+   * per tool call don't create a session per call.
+   */
+  reuseSessionWithinMs?: number;
 }
 
 export interface RevisionInput {
@@ -332,6 +339,27 @@ export class Store {
               "INSERT INTO participants (id, display_name, default_client, default_model, default_role, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .run(id, input.displayName ?? id, input.client ?? null, input.model ?? null, input.role ?? null, t, t);
+        }
+        if (input.reuseSessionWithinMs !== undefined) {
+          const recent = this.db
+            .prepare(
+              `SELECT * FROM sessions
+                WHERE participant_id = ? AND client IS ? AND model IS ? AND role IS ? AND capabilities = ? AND last_seen_at >= ?
+                ORDER BY last_seen_at DESC LIMIT 1`,
+            )
+            .get(
+              id,
+              input.client ?? null,
+              input.model ?? null,
+              input.role ?? null,
+              JSON.stringify(capabilities),
+              new Date(Date.parse(t) - input.reuseSessionWithinMs).toISOString(),
+            ) as SessionRow | undefined;
+          if (recent) {
+            this.db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run(t, recent.id);
+            const session: Session = { ...recent, capabilities, last_seen_at: t };
+            return { participant: this.getParticipant(id), session, cursors: this.getCursors(id) };
+          }
         }
         const session: Session = {
           id: ulid(),
