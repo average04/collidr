@@ -12,7 +12,7 @@ v1 (manual participation, diff review and plan review) is implemented and passes
 
 ## Requirements
 
-- Node.js 20 or later
+- Node.js 22 or later
 - SQLite 3.51.3 or later — the bundled `better-sqlite3` build qualifies; Collidr refuses to start on older versions
 
 The database lives at `~/.collidr/hub.db` (set `COLLIDR_DB` to change it). Keep it on local storage, never a network drive or a synced folder.

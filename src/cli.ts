@@ -130,7 +130,7 @@ function doctor(): number {
     process.stdout.write(`${okay ? "ok  " : "FAIL"} ${label}: ${detail}\n`);
   };
   const nodeMajor = Number(process.versions.node.split(".")[0]);
-  line(nodeMajor >= 20, "node", process.versions.node);
+  line(nodeMajor >= 22, "node", process.versions.node);
 
   const file = defaultDatabasePath();
   try {
