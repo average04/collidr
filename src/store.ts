@@ -846,6 +846,20 @@ export class Store {
     return { events: page, event_cursor: page.length > 0 ? page[page.length - 1]!.seq : after, has_more: hasMore };
   }
 
+  /** Every event, regardless of participant: the human operator's view (CLI watch). */
+  listAllEvents(opts: { afterSeq?: number; threadId?: string; workspaceId?: string; limit?: number } = {}): EventPage {
+    const limit = clampLimit(opts.limit, DEFAULT_PAGE, MAX_PAGE);
+    const after = opts.afterSeq ?? 0;
+    const where = ["seq > @after"];
+    if (opts.threadId) where.push("thread_id = @thread");
+    if (opts.workspaceId) where.push("workspace_id = @workspace");
+    const rows = this.db
+      .prepare(`SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY seq LIMIT @limit`)
+      .all({ after, thread: opts.threadId ?? null, workspace: opts.workspaceId ?? null, limit: limit + 1 }) as EventRow[];
+    const page = rows.slice(0, limit).map((r) => this.hydrate(r));
+    return { events: page, event_cursor: page.length > 0 ? page[page.length - 1]!.seq : after, has_more: rows.length > limit };
+  }
+
   private hydrate(row: EventRow): HubEvent {
     const ev: HubEvent = { ...row, recipients: parseJson<string[]>(row.recipients) };
     switch (row.type) {
