@@ -9,9 +9,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const root = realpathSync(mkdtempSync(join(tmpdir(), 'collidr-package-')));
 const npm = process.env.npm_execpath;
 assert(npm && existsSync(npm), 'Run through npm run test:package');
+const root = realpathSync(mkdtempSync(join(tmpdir(), 'collidr-package-')));
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, encoding: 'utf8', timeout: 180000,
     maxBuffer: 4 * 1024 * 1024, windowsHide: true, shell: false, ...options });
@@ -21,6 +21,7 @@ function run(command, args, options = {}) {
 }
 const npmRun = (args, options) => run(process.execPath, [npm, ...args], options);
 let client;
+let failure;
 try {
   const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   const version = readFileSync(join(repo, 'src/version.ts'), 'utf8').match(/VERSION = "([^"]+)"/)[1];
@@ -95,9 +96,14 @@ try {
   const retained = join(repo, 'artifacts', packed.filename);
   mkdirSync(dirname(retained), { recursive: true }); cpSync(tarball, retained);
   console.log(`PASS: installed CLI, setup, doctor and MCP; tarball ${retained}\nSHA256 ${createHash('sha256').update(readFileSync(retained)).digest('hex')}`);
+} catch (error) {
+  failure = error;
 } finally {
-  if (client) await client.close();
-  const rel = relative(realpathSync(tmpdir()), root);
-  assert(rel && !rel.startsWith('..') && !resolve(root).endsWith('..'), 'Unsafe cleanup root');
-  rmSync(root, { recursive: true, force: true });
+  try { if (client) await client.close(); } catch (error) { failure ??= error; }
+  try {
+    const rel = relative(realpathSync(tmpdir()), root);
+    assert(rel && !rel.startsWith('..') && !resolve(root).endsWith('..'), 'Unsafe cleanup root');
+    rmSync(root, { recursive: true, force: true });
+  } catch (error) { failure ??= error; }
 }
+if (failure) throw failure;
