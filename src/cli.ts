@@ -21,6 +21,7 @@ Usage:
   collidr threads [--workspace <path>] [--status open|resolved|unresolved]
   collidr show <thread_id>          Thread state, revisions, requests and history
   collidr doctor                    Check Node, SQLite, database and configuration
+  collidr runner --help             Manage automatic Claude/Codex handoffs
 
 Environment:
   COLLIDR_PARTICIPANT   Stable participant ID for this MCP server (e.g. codex-reviewer)
@@ -165,6 +166,7 @@ function doctor(): number {
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+  if (command === "runner") return (await import("./runner/cli.js")).runnerMain(rest);
   const { values, positionals } = parseArgs({
     args: rest,
     allowPositionals: true,

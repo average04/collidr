@@ -4,11 +4,13 @@ A local MCP coordination hub for AI agents to collaborate on code reviews, brain
 
 Claude Code, Codex CLI, Gemini CLI, Grok Build — any client that can run a local MCP server — each start their own `collidr serve` process. All of them share one SQLite database on your machine, so agents can open review threads, read the exact revision under review, leave anchored comments and verdicts, and wait for each other.
 
-Collidr stores and delivers messages; it does not start or resume agents. You run each agent yourself, and they coordinate through Collidr.
+Collidr stores and delivers messages. You can run agents yourself, or use the optional runner to resume dedicated Claude and Codex sessions automatically when a review request or reply arrives.
 
 ## Status
 
 v1 (manual participation, diff review and plan review) is implemented and passes the spec's acceptance suite, including an end-to-end Claude ↔ Codex exchange over real stdio MCP connections with restarts, retries and a changed diff.
+
+Managed participation adds a local runner with durable delivery state, dedicated sessions, and bounded automatic handoffs. It uses your installed, authenticated Claude Code and Codex CLIs.
 
 ## Requirements
 
@@ -74,6 +76,42 @@ Start both agents in the same repository, then:
 2. **Tell Claude:** "Use collidr to open a diff_review of my uncommitted changes with `codex` as reviewer, then wait for the verdict and address it."
 3. Watch it happen in a third terminal: `collidr watch`.
 
+## Automatic handoffs
+
+Build this checkout, then initialize a runner configuration. Pick one canonical workspace and hub database for the exchange. Configuration paths are resolved relative to the configuration file.
+
+```powershell
+npm run build
+node dist/cli.js runner init --workspace D:\Projects\collidr --config "$HOME\.collidr\runner.json"
+node dist/cli.js runner start --config "$HOME\.collidr\runner.json" --background
+node dist/cli.js runner task --config "$HOME\.collidr\runner.json" --agent claude-managed --prompt "Open a plan_review for a small change and ask codex-managed to review it. Address feedback and resolve the thread when approved."
+node dist/cli.js runner status --config "$HOME\.collidr\runner.json"
+```
+
+The runner starts `claude-managed` and `codex-managed` as separate participants and saves their exact provider session IDs. Your interactive conversations keep their own inboxes. Existing threads addressed to `claude` or `codex` stay with those participants; new automatic reviews must name the managed IDs. You can also use `--prompt-file PATH` for a longer initial task.
+
+Once a task is submitted, the runner handles the author → reviewer → author exchange. It runs one agent at a time per workspace. It checkpoints delivery only after Collidr shows progress, wakes the author for a verdict, and skips closed threads and superseded requests. It never consumes the agents' own acknowledgment cursors. A second supervisor for the same workspace and database is rejected.
+
+The foreground command runs until Ctrl+C. `--background` uses a hidden process and appends lifecycle messages to `runner.log` beside the hub database. The runner must remain running, and both CLIs must already be signed in. It does not install a login service. The adapters target Claude Code 2.1.301's print-mode protocol and Codex 0.163.0-alpha.11's App Server protocol; incompatible older CLIs produce a blocked task with diagnostics. To operate it:
+
+```powershell
+node dist/cli.js runner status --config "$HOME\.collidr\runner.json"
+node dist/cli.js runner retry --config "$HOME\.collidr\runner.json" --agent claude-managed
+node dist/cli.js runner stop --config "$HOME\.collidr\runner.json"
+```
+
+`status` reports session IDs, queued tasks, current work, and any blocking reason. Permission requests, provider errors, timeouts, and turns that produce no Collidr progress pause that participant. Inspect the reason, fix the problem, then use `retry`; retries are never automatic after an uncertain run. Stopping cancels the active provider process. Restarting preserves sessions and pending work. A crashed active delivery becomes blocked instead of being blindly repeated.
+
+The generated config explicitly allows both agents to use Collidr's coordination tools, so routine reads, review posts and resolutions do not need a human relay. Codex applies `allowedTools` to the twelve known Collidr tools using per-tool policy overrides; an exact `mcp__collidr__post` entry allows only that tool, while `mcp__collidr__*` allows the current coordination tool set. Other MCP servers and unknown future tools receive no grant. Claude also receives basic file-reading tools. Add narrowly scoped entries to Claude's `allowedTools` if you want it to edit files or run particular commands; otherwise such requests pause for your attention.
+
+Codex reads its effective project configuration, preserves a read-only sandbox and restrictive approval policies, and caps broader filesystem access at `workspace-write`. If no sandbox is configured, the runner chooses read-only. Remaining approvals are routed to the user, and the runner pauses if the App Server requests one. Neither adapter bypasses permissions or authorizes a merge. Normal provider/project settings still apply; Claude uses only the explicitly configured MCP server, while Codex overrides its Collidr server in the child process. Global agent configuration files are not changed.
+
+You can change provider `command`, `args`, optional `model`, role `instructions`, and limits in the JSON config. Native executables and `node` plus a JavaScript CLI are supported; Windows `.cmd`, `.bat`, and `.ps1` wrappers are rejected. Restart after changing configuration. Defaults are a one-second poll, five-minute invocation timeout, 20 Claude turns per invocation, and 12 provider invocations per Collidr thread. The latter count persists across restarts. Runner state lives in `<hub database>.runner.db`; keep it with the hub when backing up. Use an isolated database when testing.
+
+Provider protocol references: [Claude headless mode](https://code.claude.com/docs/en/headless), [Claude CLI options](https://code.claude.com/docs/en/cli-reference), and [Codex App Server](https://learn.chatgpt.com/docs/app-server).
+
+On Windows, provider processes run inside a private Windows Job Object. The launcher uses built-in Windows PowerShell 5.1 and .NET to assign the provider before it starts, so descendants are cleaned up even if the provider exits first. This adds a short startup delay. Command arguments remain data; prompts are sent through stdin or JSON RPC. If process ownership cannot be established, the invocation fails instead of running untracked.
+
 ## Tools
 
 | Tool | Purpose |
@@ -99,6 +137,7 @@ collidr watch [--thread id]   live tail of events
 collidr threads               list threads in the current repository
 collidr show <thread_id>      state, requests, resolution and history
 collidr doctor                check Node, SQLite, database and workspace
+collidr runner --help         automatic handoff setup and operation
 ```
 
 ## Development

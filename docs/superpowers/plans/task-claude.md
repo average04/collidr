@@ -1,0 +1,7 @@
+# Claude adapter brief
+
+Implement `src/runner/claude.ts`, exporting `ClaudeAdapter implements AgentAdapter` from types.ts. Own this file and `test/runner-claude.test.ts`, `test/fixtures/fake-claude.mjs` only. Read managed-participation design. Use installed CLI and official documentation research already completed. Test first with native Node child fixtures. No commits; shared worktree.
+
+Root provides `spawnAgent(command, args, {cwd, env?}): ChildProcessWithoutNullStreams` and `terminateChild(child): Promise<void>` in process.ts. spawnAgent uses shell:false, windowsHide:true; env merges parent. One `claude -p` invocation per run. Exact session resume using saved context.sessionId; new session ID from system/init persisted immediately via onSession. Prompt through stdin, never shell. Strict per-child MCP configuration with dedicated agent.id, configured workspace/database/cliPath. AllowedTools from config, bounded maxTurns, optional model. Do not bypass permission checks. Parse NDJSON with bounded buffers. Block on permission denial, requires_action, timeout/abort, failed result; require successful result plus clean exit to succeed. Include bounded stderr diagnostics. EOF without result or malformed JSON fails. Close/kill all owned child processes on cancellation/error.
+
+Report file changes, failing test evidence before implementation, successful targeted tests, integration assumptions, and risks.
