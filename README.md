@@ -32,7 +32,7 @@ collidr setup
 
 After registry publication, the installation command will be `npm install --global collidr`. This registry route is not available yet.
 
-Install Claude Code and Codex separately and authenticate them first (`claude auth login` and `codex login`). Setup discovers the installed providers, checks their versions, Node and an isolated SQLite database, and writes a dedicated runner configuration. It does not run model turns or check authentication. Follow the printed commands using the exact config path throughout:
+Install Claude Code and Codex separately and authenticate them first (`claude auth login` and `codex login`). Setup discovers the installed providers, probes that each launches with `--version`, checks Node and an isolated SQLite database, and writes a dedicated runner configuration. The launch probes do not verify provider version compatibility or authentication; setup does not run model turns. Follow the printed commands using the exact config path throughout:
 
 ```sh
 collidr setup --yes --workspace /path/to/your/project --config /path/to/runner.json
@@ -56,7 +56,11 @@ collidr runner status --config /path/to/runner.json
 
 ## Connect your agents
 
-This section is optional manual configuration for interactive clients. Give every client its **own stable participant ID** with `COLLIDR_PARTICIPANT`. Two conversations that need separate inboxes must use different IDs. Read `cliPath` from your generated runner config to find the stable installed `dist/cli.js`. In the examples, replace `/absolute/path/to/collidr/dist/cli.js` with that value; use the absolute Node executable as `command` if Node is not on the client PATH. Windows clients also launch Node plus the JavaScript file, avoiding npm shell shims.
+This section is optional manual configuration for interactive clients. It does not require `collidr setup` or both provider CLIs; configure only the clients you use. Give every client its **own stable participant ID** with `COLLIDR_PARTICIPANT`. Two conversations that need separate inboxes must use different IDs.
+
+For a global npm installation, run `npm root --global` and append `collidr/dist/cli.js` to the printed directory to obtain the stable CLI path. If you installed with a custom prefix, use `npm root --global --prefix /path/to/prefix`. You can also use `cliPath` from an existing runner config, or the absolute `dist/cli.js` path in a source checkout after `npm run build`.
+
+In the examples, replace `/absolute/path/to/collidr/dist/cli.js` with that path; use the absolute Node executable as `command` if Node is not on the client PATH. Windows clients also launch Node plus the JavaScript file, avoiding npm shell shims.
 
 **Claude Code**
 
