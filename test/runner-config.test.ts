@@ -6,7 +6,7 @@ import { loadConfig, createConfig, writeConfig } from "../src/runner/config.js";
 
 const dirs: string[] = [];
 function setup() {
-  const dir = mkdtempSync(join(tmpdir(), "collidr-runner-config-")); dirs.push(dir);
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "collidr-runner-config-"))); dirs.push(dir);
   mkdirSync(join(dir, "workspace")); writeFileSync(join(dir, "cli.js"), "");
   return { dir, file: join(dir, "config.json"), value: {
     version: 1, workspace: "workspace", database: "data/hub.db", cliPath: "cli.js",
@@ -15,7 +15,7 @@ function setup() {
       args: [], instructions: "Review carefully", allowedTools: ["Read"], maxTurns: 20 }],
   } };
 }
-afterEach(() => { for (const dir of dirs.splice(0)) { if (!resolve(dir).startsWith(resolve(tmpdir()))) throw new Error("unsafe cleanup"); rmSync(dir, { recursive: true, force: true }); } });
+afterEach(() => { for (const dir of dirs.splice(0)) { if (!resolve(dir).startsWith(realpathSync.native(tmpdir()))) throw new Error("unsafe cleanup"); rmSync(dir, { recursive: true, force: true }); } });
 describe("runner configuration", () => {
   it("resolves paths relative to the config, independent of cwd", () => {
     const { dir, file, value } = setup(); writeFileSync(file, JSON.stringify(value));

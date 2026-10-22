@@ -19,25 +19,53 @@ Managed participation adds a local runner with durable delivery state, dedicated
 
 The database lives at `~/.collidr/hub.db` (set `COLLIDR_DB` to change it). Keep it on local storage, never a network drive or a synced folder.
 
-## Install
+## Install and set up managed agents
+
+Collidr is not yet published to npm. For now, obtain a tested `collidr-0.1.0.tgz` from the maintainer, or create one in a source checkout with `npm ci` followed by `npm run pack:release`. Packing compiles the runtime. `pack:release` explicitly enables the build hook because this repository disables dependency install scripts in `.npmrc`. Copy the tarball to the target machine; that machine does not need a source checkout or TypeScript.
 
 ```sh
-git clone https://github.com/average04/collidr.git
-cd collidr
-npm install
-npm run build
-npm link        # optional: puts `collidr` on your PATH
+npm install --global ./collidr-0.1.0.tgz
 collidr doctor
+cd /path/to/your/project
+collidr setup
+```
+
+After registry publication, the installation command will be `npm install --global collidr`. This registry route is not available yet.
+
+Install Claude Code and Codex separately and authenticate them first (`claude auth login` and `codex login`). Setup discovers the installed providers, probes that each launches with `--version`, checks Node and an isolated SQLite database, and writes a dedicated runner configuration. The launch probes do not verify provider version compatibility or authentication; setup does not run model turns. Follow the printed commands using the exact config path throughout:
+
+```sh
+collidr setup --yes --workspace /path/to/your/project --config /path/to/runner.json
+collidr runner start --config /path/to/runner.json --background
+collidr runner status --config /path/to/runner.json
+collidr runner task --config /path/to/runner.json --agent claude-managed --prompt "Describe your task"
+```
+
+`--yes` accepts defaults and never starts the runner; starting requires `--start` or a separate start command. The default config is `~/.collidr/runners/<workspace-hash>.json`. Existing configurations are preserved: setup refuses to overwrite them and prints commands for using them. You can choose `--database FILE` and `--config FILE` explicitly.
+
+Managed Claude and Codex sessions receive their Collidr MCP connection automatically, using dedicated `claude-managed` and `codex-managed` identities. No interactive client configuration changes are needed for this flow. Keep the installed package and Node executable at stable paths: the generated config records the installed CLI path. Setup rejects transient npm `_npx` cache paths.
+
+To upgrade, stop the runner, install the replacement tarball, then restart using the same config (and stable global npm prefix):
+
+```sh
+collidr runner stop --config /path/to/runner.json
+npm install --global ./collidr-0.1.0.tgz
+collidr runner start --config /path/to/runner.json --background
+collidr runner status --config /path/to/runner.json
 ```
 
 ## Connect your agents
 
-Give every client its **own stable participant ID** with `COLLIDR_PARTICIPANT`. Two conversations that need separate inboxes must use different IDs. The examples below use the path `D:\Projects\collidr`; adjust to where you cloned it.
+This section is optional manual configuration for interactive clients. It does not require `collidr setup` or both provider CLIs; configure only the clients you use. Give every client its **own stable participant ID** with `COLLIDR_PARTICIPANT`. Two conversations that need separate inboxes must use different IDs.
+
+For a global npm installation, run `npm root --global` and append `collidr/dist/cli.js` to the printed directory to obtain the stable CLI path. If you installed with a custom prefix, use `npm root --global --prefix /path/to/prefix`. You can also use `cliPath` from an existing runner config, or the absolute `dist/cli.js` path in a source checkout after `npm run build`.
+
+In the examples, replace `/absolute/path/to/collidr/dist/cli.js` with that path; use the absolute Node executable as `command` if Node is not on the client PATH. Windows clients also launch Node plus the JavaScript file, avoiding npm shell shims.
 
 **Claude Code**
 
 ```sh
-claude mcp add collidr --scope user -e COLLIDR_PARTICIPANT=claude -- node D:\Projects\collidr\dist\cli.js serve
+claude mcp add collidr --scope user -e COLLIDR_PARTICIPANT=claude -- node /absolute/path/to/collidr/dist/cli.js serve
 ```
 
 **Codex CLI** — `~/.codex/config.toml`
@@ -45,7 +73,7 @@ claude mcp add collidr --scope user -e COLLIDR_PARTICIPANT=claude -- node D:\Pro
 ```toml
 [mcp_servers.collidr]
 command = "node"
-args = ["D:\\Projects\\collidr\\dist\\cli.js", "serve"]
+args = ["/absolute/path/to/collidr/dist/cli.js", "serve"]
 env = { COLLIDR_PARTICIPANT = "codex" }
 tool_timeout_sec = 60
 ```
@@ -57,7 +85,7 @@ tool_timeout_sec = 60
   "mcpServers": {
     "collidr": {
       "command": "node",
-      "args": ["D:\\Projects\\collidr\\dist\\cli.js", "serve"],
+      "args": ["/absolute/path/to/collidr/dist/cli.js", "serve"],
       "env": { "COLLIDR_PARTICIPANT": "gemini" }
     }
   }
@@ -86,15 +114,7 @@ These are dedicated background sessions, separate from your visible Claude and C
 
 ### Start the runner
 
-Build the checkout, then initialize a configuration once. Pick one canonical checkout, workspace, and hub database for both clients and the runner; two clones of the same repository have different workspace IDs. Configuration paths are resolved relative to the configuration file. If a runner is already configured, use its existing config path and skip `init`; if it is already running, go straight to the live test. When upgrading, stop the existing runner before rebuilding, then start it again with the same config.
-
-```powershell
-Set-Location D:\Projects\collidr
-npm run build
-node dist/cli.js runner init --workspace D:\Projects\collidr --config "$HOME\.collidr\runner.json"
-node dist/cli.js runner start --config "$HOME\.collidr\runner.json" --background
-node dist/cli.js runner status --config "$HOME\.collidr\runner.json"
-```
+Run `collidr setup` once as shown above and use its printed config path. Pick one canonical workspace and hub database for both clients and the runner; two clones of the same repository have different workspace IDs. Configuration paths are resolved relative to the configuration file. If a runner is already configured, use its existing config path and skip setup. The remaining detailed examples use `node dist/cli.js` from a built source checkout; installed users can replace that prefix with `collidr` and use their actual config path. When upgrading, stop the existing runner first and restart it with the same configuration.
 
 The generated configuration uses `claude-managed` and `codex-managed`. Automatic reviews must target the participant IDs in your runner configuration. With the default configuration, requests assigned to the interactive IDs `claude` or `codex` do not trigger automatic review turns. The `-managed` suffix is a naming convention; if you customize IDs, keep them distinct from your interactive clients so their inboxes and cursors stay separate.
 
@@ -179,13 +199,20 @@ collidr watch [--thread id]   live tail of events
 collidr threads               list threads in the current repository
 collidr show <thread_id>      state, requests, resolution and history
 collidr doctor                check Node, SQLite, database and workspace
+collidr setup                 configure dedicated managed Claude/Codex sessions
 collidr runner --help         automatic handoff setup and operation
 ```
 
 ## Development
 
+Use a current Node 22 or 24 release (Vitest requires Node 22.12+ on the 22.x line). Runtime consumers require Node 22+. CI covers Windows, macOS and Linux on both contributor Node versions.
+
+
 ```sh
-npm install
-npm test          # builds, then runs unit, multi-process and MCP end-to-end tests
+npm ci
+npm run build
+npm test          # unit, multi-process and MCP end-to-end tests
 npm run typecheck
 ```
+
+See [release checklist](docs/releasing.md) for packaging and publication.

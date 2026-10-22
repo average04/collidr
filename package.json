@@ -18,7 +18,10 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:package": "node scripts/package-smoke.mjs",
+    "prepack": "npm run build",
+    "pack:release": "npm pack --ignore-scripts=false"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
@@ -31,5 +34,13 @@
     "@types/node": "^22.15.0",
     "typescript": "^5.9.0",
     "vitest": "^5.0.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/average04/collidr.git"
+  },
+  "homepage": "https://github.com/average04/collidr#readme",
+  "bugs": {
+    "url": "https://github.com/average04/collidr/issues"
   }
 }

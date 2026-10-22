@@ -21,6 +21,7 @@ Usage:
   collidr threads [--workspace <path>] [--status open|resolved|unresolved]
   collidr show <thread_id>          Thread state, revisions, requests and history
   collidr doctor                    Check Node, SQLite, database and configuration
+  collidr setup [--yes]             Configure managed Claude/Codex sessions
   collidr runner --help             Manage automatic Claude/Codex handoffs
 
 Environment:
@@ -166,6 +167,7 @@ function doctor(): number {
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+  if (command === "setup") return (await import("./setup.js")).setupMain(rest);
   if (command === "runner") return (await import("./runner/cli.js")).runnerMain(rest);
   const { values, positionals } = parseArgs({
     args: rest,

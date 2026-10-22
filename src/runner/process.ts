@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, statSync } from "node:fs";
 import { delimiter, extname, isAbsolute, join, resolve } from "node:path";
 import type { Provider } from "./types.js";
+import { findProviderLaunch } from "./discovery.js";
 
 export function validateCommand(command: string): void {
   if (!command.trim() || /[\r\n\0]/.test(command) || /\.(cmd|bat|ps1)$/i.test(command)) {
@@ -22,24 +22,10 @@ function executableOnPath(command: string): string | undefined {
   return undefined;
 }
 
+/** @deprecated Native-only compatibility. Use findProviderLaunch to preserve JS bin arguments. */
 export function findProviderCommand(provider: Provider): string {
-  const onPath = executableOnPath(provider);
-  if (onPath) return onPath;
-  if (process.platform === "win32") {
-    if (provider === "claude") {
-      const native = join(homedir(), ".local", "bin", "claude.exe");
-      if (existsSync(native)) return native;
-    } else {
-      const bin = join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "OpenAI", "Codex", "bin");
-      if (existsSync(bin)) {
-        const candidates = readdirSync(bin).map(entry => join(bin, entry, "codex.exe")).filter(existsSync);
-        candidates.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-        if (candidates[0]) return candidates[0];
-      }
-    }
-  }
-  // Keep init useful before a provider is installed; start reports the missing executable.
-  return provider;
+  const launch = findProviderLaunch(provider);
+  return launch && launch.args.length === 0 ? launch.command : provider;
 }
 
 // A fixed Windows PowerShell program creates the native provider suspended,

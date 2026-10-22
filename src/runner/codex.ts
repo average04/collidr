@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { basename } from "node:path";
 import { spawnAgent, terminateChild } from "./process.js";
 import type { AgentAdapter, AgentContext, AgentResult } from "./types.js";
 
@@ -87,7 +88,25 @@ function argumentsFor(context: AgentContext): string[] {
       overrides.push(`mcp_servers.collidr.tools.${name}.approval_mode="approve"`);
     }
   }
-  return [...context.agent.args, "app-server", "--listen", "stdio://", ...overrides.flatMap(value => ["-c", value])];
+  // Node flags and the JS entrypoint belong to the launcher. Only provider
+  // config flags move: app-server's config/read does not see global -c values.
+  const args = context.agent.args;
+  const node = context.agent.command === process.execPath || /^(?:node|nodejs)(?:\.exe)?$/i.test(basename(context.agent.command));
+  const entrypoint = node ? args.findIndex(arg => !arg.startsWith("-") && /\.(?:c|m)?js$/i.test(arg)) : -1;
+  const prefixLength = entrypoint + 1;
+  const prefix = args.slice(0, prefixLength);
+  const providerConfig: string[] = [];
+  for (let index = prefixLength; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "-c" || arg === "--config") {
+      const value = args[++index];
+      if (value === undefined) throw new Error(`Codex ${arg} requires a configuration value`);
+      providerConfig.push(arg, value);
+    } else if (arg.startsWith("--config=") || (arg.startsWith("-c") && arg.length > 2)) {
+      providerConfig.push(arg);
+    } else prefix.push(arg);
+  }
+  return [...prefix, "app-server", "--listen", "stdio://", ...providerConfig, ...overrides.flatMap(value => ["-c", value])];
 }
 
 export class CodexAdapter implements AgentAdapter {

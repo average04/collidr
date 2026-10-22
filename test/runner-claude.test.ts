@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { realpathSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 function context(mode = "success", overrides: Partial<AgentContext> = {}): AgentContext {
-  const workspace = mkdtempSync(join(tmpdir(), "collidr-claude-"));
+  const workspace = realpathSync.native(mkdtempSync(join(tmpdir(), "collidr-claude-")));
   directories.push(workspace);
   return {
     agent: { id: "claude-managed", provider: "claude", command: process.execPath,

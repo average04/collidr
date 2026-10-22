@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { realpathSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function setup(scenario = "complete") {
-  const directory = mkdtempSync(join(tmpdir(), "collidr-codex-test-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "collidr-codex-test-")));
   directories.push(directory);
   const capture = join(directory, "wire.jsonl");
   const controller = new AbortController();
@@ -68,6 +68,30 @@ describe("Codex managed adapter", () => {
     } });
   });
 
+  it.each([
+    ["short separate", ["-c", 'sandbox_mode="workspace-write"']],
+    ["long separate", ["--config", 'sandbox_mode="workspace-write"']],
+    ["long equals", ['--config=sandbox_mode="workspace-write"']],
+    ["short attached", ['-csandbox_mode="workspace-write"']],
+    ["short equals", ['-c=sandbox_mode="workspace-write"']],
+  ])("passes %s provider overrides to app-server after the Node launch prefix", async (_name, override) => {
+    const s = setup();
+    const user = [...override, "-c", 'mcp_servers.collidr.command="untrusted-command"',
+      "--config", "mcp_servers.collidr.required=false"];
+    s.context.agent.args = ["--no-warnings", ...s.context.agent.args, "--profile", "team", ...user];
+    const result = await new CodexAdapter().run(s.context);
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
+    const args = s.wire()[0].args as string[];
+    expect(args.slice(0, 5)).toEqual(["--profile", "team", "app-server", "--listen", "stdio://"]);
+    expect(args.slice(5, 5 + user.length)).toEqual(user);
+    // Node successfully ran the JS fixture with its own flag intact. Provider
+    // values stay in order, and managed MCP settings win repeated-key precedence.
+    expect(args.indexOf(`mcp_servers.collidr.command=${JSON.stringify(process.execPath)}`))
+      .toBeGreaterThan(args.indexOf('mcp_servers.collidr.command="untrusted-command"'));
+    expect(args.indexOf("mcp_servers.collidr.required=true"))
+      .toBeGreaterThan(args.indexOf("mcp_servers.collidr.required=false"));
+  });
+
   it.each([false, true])("preserves read-only/untrusted permissions when resuming is %s", async (resume) => {
     const s = setup("readonly-config");
     if (resume) s.context.sessionId = "saved-restricted-session";
@@ -86,7 +110,8 @@ describe("Codex managed adapter", () => {
 
   it.each(["unset-config", "null-config"])("defaults %s to read-only instead of adding write authority", async (scenario) => {
     const s = setup(scenario);
-    expect(await new CodexAdapter().run(s.context)).toMatchObject({ status: "completed" });
+    const result = await new CodexAdapter().run(s.context);
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
     expect(s.wire().find((entry) => entry.method === "thread/start").params).toMatchObject({ sandbox: "read-only", approvalPolicy: "on-request" });
   });
 
