@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as sleep } from "node:timers/promises";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setupMain, defaultConfigPath, quoteArgument } from "../src/setup.js";
 import { createConfig } from "../src/runner/config.js";
+import { processAlive } from "../src/runner/process-identity.js";
 
 const roots: string[] = [];
 function fixture() {
@@ -22,7 +24,7 @@ function fixture() {
   const options = { cwd: workspace, home: root, cliPath, isTTY: false, discovery: { platform: "win32" as const, env: { PATH: bin, LOCALAPPDATA: root }, home: root }, output: (s: string) => { output += s; } };
   return { root, workspace, cliPath, options, output: () => output, config: join(root, "runner.json"), database: join(root, "production.db") };
 }
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 const exec = promisify(execFile);
 const installedCli = resolve("dist/cli.js");
 describe("setup wizard", () => {
@@ -45,7 +47,19 @@ describe("setup wizard", () => {
       const status = await exec(process.execPath, [installedCli, "runner", "status", "--config", f.config], { env, windowsHide: true, timeout: 20000 });
       expect(JSON.parse(status.stdout).lease.pid).toBeGreaterThan(0);
     } finally {
-      if (existsSync(f.config)) await exec(process.execPath, [installedCli, "runner", "stop", "--config", f.config], { env, windowsHide: true, timeout: 40000 });
+      if (existsSync(f.config)) {
+        const status = await exec(process.execPath, [installedCli, "runner", "status", "--config", f.config], { env, windowsHide: true, timeout: 20000 });
+        const pid: number | undefined = JSON.parse(status.stdout).lease?.pid;
+        await exec(process.execPath, [installedCli, "runner", "stop", "--config", f.config], { env, windowsHide: true, timeout: 40000 });
+        // stop acknowledges lease release before the supervisor closes SQLite.
+        // Observe the isolated supervisor's exit before filesystem teardown;
+        // a reused or inaccessible PID conservatively times out without signals.
+        if (pid !== undefined) {
+          const deadline = Date.now() + 10000;
+          while (processAlive(pid) && Date.now() < deadline) await sleep(50);
+          expect(processAlive(pid), "isolated setup runner must exit before cleanup").toBe(false);
+        }
+      }
     }
   }, 60000);
   it("writes launch arguments and dedicated identities without creating the production database", async () => {

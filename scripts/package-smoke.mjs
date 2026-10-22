@@ -11,7 +11,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const npm = process.env.npm_execpath;
 assert(npm && existsSync(npm), 'Run through npm run test:package');
-const root = realpathSync(mkdtempSync(join(tmpdir(), 'collidr-package-')));
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'collidr-package-')));
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, encoding: 'utf8', timeout: 180000,
     maxBuffer: 4 * 1024 * 1024, windowsHide: true, shell: false, ...options });
@@ -112,7 +112,7 @@ try {
 } finally {
   try { if (client) await client.close(); } catch (error) { failure ??= error; }
   try {
-    const rel = relative(realpathSync(tmpdir()), root);
+    const rel = relative(realpathSync.native(tmpdir()), root);
     assert(rel && !rel.startsWith('..') && !resolve(root).endsWith('..'), 'Unsafe cleanup root');
     rmSync(root, { recursive: true, force: true });
   } catch (error) { failure ??= error; }
