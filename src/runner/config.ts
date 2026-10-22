@@ -3,7 +3,8 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { defaultDatabasePath } from "../db.js";
 import { findGitRoot } from "../workspace.js";
-import { findProviderCommand, validateCommand } from "./process.js";
+import { validateCommand } from "./process.js";
+import { findProviderLaunch, type ProviderLaunch } from "./discovery.js";
 import type { RunnerConfig } from "./types.js";
 
 const agentSchema = z.object({
@@ -52,13 +53,14 @@ export function loadConfig(file: string, options: { launch?: boolean } = {}): Ru
   return config;
 }
 
-export function createConfig(workspace: string, cliPath: string, database = defaultDatabasePath()): RunnerConfig {
+export function createConfig(workspace: string, cliPath: string, database = defaultDatabasePath(), launches?: Record<"claude" | "codex", ProviderLaunch>): RunnerConfig {
   if (!existsSync(workspace) || !statSync(workspace).isDirectory()) throw new Error(`Workspace is not a directory: ${workspace}`);
   const config: RunnerConfig = {
     version: 1, workspace: canonicalPath(findGitRoot(workspace) ?? workspace), database: canonicalPath(database), cliPath: resolve(cliPath),
     pollIntervalMs: 1000, turnTimeoutMs: 300000, maxTurnsPerThread: 12,
-    agents: ["claude", "codex"].map(provider => ({
-      id: `${provider}-managed`, provider: provider as "claude" | "codex", command: findProviderCommand(provider as "claude" | "codex"), args: [],
+    agents: (["claude", "codex"] as const).map(provider => ({
+      id: `${provider}-managed`, provider,
+      ...(launches?.[provider] ?? findProviderLaunch(provider) ?? { command: provider, args: [] }),
       instructions: provider === "claude"
         ? "Implement the assigned task, then request a review from codex-managed using Collidr. Address feedback and submit a new revision. Resolve the thread when approved."
         : "Review the assigned Collidr revision carefully, inspect relevant files, and post a verdict responding to the current request. Give concrete findings with evidence.",
