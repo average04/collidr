@@ -86,7 +86,8 @@ describe("Codex managed adapter", () => {
 
   it.each(["unset-config", "null-config"])("defaults %s to read-only instead of adding write authority", async (scenario) => {
     const s = setup(scenario);
-    expect(await new CodexAdapter().run(s.context)).toMatchObject({ status: "completed" });
+    const result = await new CodexAdapter().run(s.context);
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
     expect(s.wire().find((entry) => entry.method === "thread/start").params).toMatchObject({ sandbox: "read-only", approvalPolicy: "on-request" });
   });
 
