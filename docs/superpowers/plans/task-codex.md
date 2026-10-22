@@ -1,0 +1,7 @@
+# Codex adapter brief
+
+Implement `src/runner/codex.ts`, exporting `CodexAdapter implements AgentAdapter` from types.ts. Own this file and `test/runner-codex.test.ts`, `test/fixtures/fake-codex.mjs` only. Read the managed-participation design. Use installed schema and official documentation research already completed; don't call real models during tests. Test first with native Node child fixtures. No commits; shared worktree.
+
+Root provides `spawnAgent(command, args, {cwd, env?}): ChildProcessWithoutNullStreams` and `terminateChild(child): Promise<void>` in process.ts. spawnAgent uses shell:false, windowsHide:true; env merges parent. Implement protocol buffering with bounded lines/output, parse failures, timeouts via context.signal, terminal completion validation, exact session persistence via onSession, approval => blocked without granting. Await child shutdown. Export class with no constructor requirements. One app-server child per invocation, persisted thread ID resumes next invocation. Config MCP to cliPath, database, workspace and dedicated agent.id via direct argv overrides. Use configured model if supplied; otherwise omit. On any startup/protocol/process error return failed with concise reason. An aborted request returns blocked. Avoid swallowing stderr diagnostics entirely. JSON RPC server requests must be routed before response IDs. Account for turn-completed notification arriving before turn/start response.
+
+Report file changes, failing test evidence before implementation, successful targeted tests, integration assumptions, and risks.
