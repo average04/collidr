@@ -68,7 +68,7 @@ Optional environment variables: `COLLIDR_MODEL`, `COLLIDR_ROLE`, `COLLIDR_DISPLA
 
 **Workspaces.** Threads belong to a repository. Collidr uses, in order: the `workspace` argument an agent passes (a path inside the repo, or a workspace ID), then `COLLIDR_WORKSPACE`, then the git root of the directory the client launched the server in. If your client doesn't launch MCP servers inside your project, ask the agent to pass `workspace` with the repo path.
 
-## Try a review
+## Try a manual review
 
 Start both agents in the same repository, then:
 
@@ -78,17 +78,50 @@ Start both agents in the same repository, then:
 
 ## Automatic handoffs
 
-Build this checkout, then initialize a runner configuration. Pick one canonical workspace and hub database for the exchange. Configuration paths are resolved relative to the configuration file.
+Submit one task and let the runner carry the conversation forward: Claude opens a review, Codex reviews it, Claude addresses feedback, and the agents repeat as needed until the author resolves the thread or a limit or error pauses the work. Normal handoffs need no human nudges.
+
+The runner is a local Node.js process that polls the hub for actionable work every second by default. Polling itself makes no model calls. It starts or resumes an agent only when that agent has a queued task, review request, or actionable reply. When there is no work, the runner keeps watching without keeping an AI conversation going.
+
+These are dedicated background sessions, separate from your visible Claude and Codex chats. The runner saves each provider's session ID and reuses it across turns and restarts.
+
+### Start the runner
+
+Build the checkout, then initialize a configuration once. Pick one canonical checkout, workspace, and hub database for both clients and the runner; two clones of the same repository have different workspace IDs. Configuration paths are resolved relative to the configuration file. If a runner is already configured, use its existing config path and skip `init`; if it is already running, go straight to the live test. When upgrading, stop the existing runner before rebuilding, then start it again with the same config.
 
 ```powershell
+Set-Location D:\Projects\collidr
 npm run build
 node dist/cli.js runner init --workspace D:\Projects\collidr --config "$HOME\.collidr\runner.json"
 node dist/cli.js runner start --config "$HOME\.collidr\runner.json" --background
-node dist/cli.js runner task --config "$HOME\.collidr\runner.json" --agent claude-managed --prompt "Open a plan_review for a small change and ask codex-managed to review it. Address feedback and resolve the thread when approved."
 node dist/cli.js runner status --config "$HOME\.collidr\runner.json"
 ```
 
-The runner starts `claude-managed` and `codex-managed` as separate participants and saves their exact provider session IDs. Your interactive conversations keep their own inboxes. Existing threads addressed to `claude` or `codex` stay with those participants; new automatic reviews must name the managed IDs. You can also use `--prompt-file PATH` for a longer initial task.
+The generated configuration uses `claude-managed` and `codex-managed`. Automatic reviews must target the participant IDs in your runner configuration. With the default configuration, requests assigned to the interactive IDs `claude` or `codex` do not trigger automatic review turns. The `-managed` suffix is a naming convention; if you customize IDs, keep them distinct from your interactive clients so their inboxes and cursors stay separate.
+
+### Run a live test
+
+With both CLIs signed in and the runner running, check `runner status` for blocking reasons before submitting a task. Resume any paused test using the retry instructions below instead of queuing a replacement. Use the same config path throughout; the examples use `runner.json`.
+
+```powershell
+node dist/cli.js runner task --config "$HOME\.collidr\runner.json" --agent claude-managed --prompt "Read README.md and open a new plan_review proposing one documentation sentence. Ask codex-managed to review it and add codex as an observer. End your turn after opening the review. When resumed, address any feedback through a new revision, then resolve the thread after approval. Do not edit repository files, commit, push, or merge."
+node dist/cli.js runner status --config "$HOME\.collidr\runner.json"
+```
+
+You can use `--prompt-file PATH` instead of `--prompt` for a longer task. The example uses the default managed IDs and the interactive `codex` observer; adjust those names to match your clients.
+
+Watch the exchange from another terminal in the same checkout:
+
+```powershell
+node dist/cli.js watch
+# Press Ctrl+C to stop watching, then inspect the new thread:
+node dist/cli.js show THREAD_ID
+```
+
+`watch` and `show` use `COLLIDR_DB` or the default hub database, not the runner config. If your config selects a custom database, set `COLLIDR_DB` to that same path in the watching terminal.
+
+Success means the current revision has the required approval, the author has resolved the thread, and both agents return idle with no blocking reason. A queued task marked `completed` only confirms its initial turn finished; check the thread's resolution to confirm the entire exchange. A straight approval usually takes three invocations (author → reviewer → author); requested changes add more turns automatically.
+
+### Delivery and recovery
 
 Once a task is submitted, the runner handles the author → reviewer → author exchange. It runs one agent at a time per workspace. It checkpoints delivery only after Collidr shows progress, wakes the author when required reviews finish or a reviewer requests changes, and skips closed threads and superseded requests. An intermediate approval or an undirected FYI comment does not start an unnecessary turn. It never consumes the agents' own acknowledgment cursors. A second supervisor for the same workspace and database is rejected.
 
@@ -101,9 +134,13 @@ node dist/cli.js runner retry --config "$HOME\.collidr\runner.json" --agent clau
 node dist/cli.js runner stop --config "$HOME\.collidr\runner.json"
 ```
 
-`status` reports session IDs, queued tasks, current work, and any blocking reason. Permission requests, provider errors, timeouts, and turns that produce no Collidr progress pause that participant. A reviewer must complete its request or ask a question or raise an objection; partial comments alone do not count as a completed delivery. Inspect the reason, fix the problem, then use `retry`; retries are never automatic after an uncertain run. Stopping cancels the active provider process. Restarting preserves sessions and pending work. A crashed active delivery becomes blocked instead of being blindly repeated.
+`status` reports session IDs, queued tasks, current work, and any blocking reason. Permission requests, provider errors (including usage or rate limits), timeouts, and turns that produce no Collidr progress pause that participant. A reviewer must complete its request or ask a question or raise an objection; partial comments alone do not count as a completed delivery. Inspect the reason, fix the problem, then use `retry`; retries are never automatic after an uncertain run. Stopping cancels the active provider process. Restarting preserves sessions and pending work. A crashed active delivery becomes blocked instead of being blindly repeated.
+
+For a provider usage limit, wait until capacity returns, then run `runner retry --config FILE --agent AGENT_ID` for the blocked participant. The runner can still be running while one agent is blocked. It does not schedule a retry at the provider's reset time, and restarting the runner does not clear the block. An explicit retry resumes the saved work in the same session; there is no need to submit the task again.
 
 An exhausted invocation budget parks only that thread's work, allowing unrelated threads to continue. `status` lists these deliveries under `deferredThreads`. `retry --agent ID --thread THREAD_ID` grants another `maxTurnsPerThread` allowance and resumes that agent's parked delivery. Lifetime invocation counts remain visible, and the global inbox checkpoint never moves backward. Ordinary `retry --agent ID` does not grant more thread budget.
+
+### Permissions and configuration
 
 The generated config explicitly allows both agents to use Collidr's coordination tools, so routine reads, review posts and resolutions do not need a human relay. Codex applies `allowedTools` to the twelve known Collidr tools using per-tool policy overrides; an exact `mcp__collidr__post` entry allows only that tool, while `mcp__collidr__*` allows the current coordination tool set. Other MCP servers and unknown future tools receive no grant. Claude receives `Read(/**)`, which scopes file reads and searches to its canonical workspace directory. Existing custom configurations retain their explicit grants; replace old generated bare `Read`, `Glob`, and `Grep` entries with `Read(/**)` to adopt the narrower default. Add narrowly scoped entries to Claude's `allowedTools` if you want it to edit files or run particular commands; otherwise such requests pause for your attention.
 
