@@ -23,6 +23,7 @@ const npmRun = (args, options) => run(process.execPath, [npm, ...args], options)
 let client;
 let failure;
 try {
+  console.log(`Packaging verification: Node ${process.version}; npm ${npmRun(['--version']).trim()}; CLI ${npm}`);
   const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   const version = readFileSync(join(repo, 'src/version.ts'), 'utf8').match(/VERSION = "([^"]+)"/)[1];
   assert.equal(manifest.version, version);
@@ -32,7 +33,7 @@ try {
   assert.equal(lock.packages[''].version, manifest.version);
   assert.equal(lock.packages[''].name, manifest.name);
   const stage = join(root, 'build'); mkdirSync(stage);
-  for (const file of ['package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.build.json', 'src', 'LICENSE', 'README.md']) {
+  for (const file of ['package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.build.json', 'src', 'LICENSE', 'README.md', '.npmrc']) {
     cpSync(join(repo, file), join(stage, file), { recursive: true });
   }
   assert(!existsSync(join(stage, 'dist')));
@@ -46,7 +47,17 @@ try {
   const tarball = join(root, packed.filename);
   const prefix = join(root, 'installed');
   console.log('Installing packed runtime into isolated prefix…');
-  npmRun(['install', '--global', '--prefix', prefix, '--omit=dev', '--no-audit', '--no-fund', tarball]);
+  const consumerEnv = { ...process.env };
+  for (const key of Object.keys(consumerEnv)) if (/^npm_/i.test(key)) delete consumerEnv[key];
+  const consumerHome = join(root, 'consumer-home'); mkdirSync(consumerHome);
+  for (const key of ['HOME', 'USERPROFILE', 'LOCALAPPDATA']) consumerEnv[key] = consumerHome;
+  const userConfig = join(root, 'consumer-user.npmrc');
+  const globalConfig = join(root, 'consumer-global.npmrc');
+  writeFileSync(userConfig, ''); writeFileSync(globalConfig, '');
+  const installation = npmRun(['install', '--global', '--prefix', prefix, '--omit=dev', '--no-audit', '--no-fund', '--foreground-scripts',
+    '--userconfig', userConfig, '--globalconfig', globalConfig, tarball], { env: consumerEnv });
+  assert(!/^>[ \t]+node-gyp(?:\.cmd)?[ \t]+rebuild(?:[ \t\r]|$)/m.test(installation),
+    'Consumer installation unexpectedly invoked node-gyp rebuild');
   const installed = join(prefix, process.platform === 'win32' ? 'node_modules' : 'lib/node_modules', 'collidr');
   const cli = join(installed, 'dist/cli.js'); assert(existsSync(cli));
   assert(!existsSync(join(installed, 'src')));
