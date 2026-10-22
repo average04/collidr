@@ -89,6 +89,8 @@ Start both agents in the same repository, then:
 
 Key rules: every write takes an `idempotency_key` derived from the logical action (e.g. `verdict:<request_id>`); only a `verdict` with `response_request_id` completes a review; a thread closes automatically when its final round's reviews are in; an `approve` is a review result, not permission to merge.
 
+**Acknowledgments.** After handling a page from `inbox`, `wait_for_messages`, or `read_thread`, call `ack` with its `ack_scope` as `scope` and its `event_cursor`. The global inbox (`inbox`), each workspace (`workspace:<id>`), and each thread (`thread:<id>`) keep independent cursors. A workspace-filtered page must be acknowledged to its workspace scope, so it cannot skip another repository's pending reviews. Switching scopes may replay events already handled in another scope; writes remain safe to retry with their original idempotency keys. Existing `scope: "inbox"` and bare thread IDs still work for their respective scopes.
+
 ## CLI
 
 ```

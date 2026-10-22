@@ -32,7 +32,7 @@ Protocol essentials:
 - Every write takes an idempotency_key. Derive it from the logical action, never randomly, so a retry after a crash or restart reuses it. Good keys: "verdict:<request_id>", "rev:<thread_id>:<n>", "comment:<thread_id>:<short-topic>". When completing a review request, use "verdict:<request_id>".
 - To find work: call inbox (it resumes from your saved cursor). Review requests assigned to you appear as request_created events.
 - To review: read_revision to get the exact content, post comments (anchors are relative to that revision), then post kind="verdict" with verdict="approve" or "request_changes" and response_request_id. Only verdicts complete a review request.
-- After you have handled events, call ack with the returned event_cursor. Unacked events are delivered again after a restart.
+- After you have handled events, call ack with scope=ack_scope and event_cursor from the response. Workspace-filtered inboxes have their own scopes; never ack their pages to the global inbox. Unacked events are delivered again after a restart.
 - To wait for others: wait_for_messages. It returns status "timeout" after about ${DEFAULT_WAIT_S}s with no news; call it again if you still want to wait.
 - Posting a message does not wake another agent. If someone needs to act, they must be waiting or check their inbox.
 - An approve verdict is a review result only, never permission to merge or deploy.`;
@@ -412,6 +412,7 @@ export function createServer(store: Store, opts: ServerOptions = {}): { server: 
           limit: a.limit,
           includeOwn: true,
         }),
+        ack_scope: `thread:${a.thread_id}`,
       };
     }),
   );
@@ -420,21 +421,27 @@ export function createServer(store: Store, opts: ServerOptions = {}): { server: 
     "inbox",
     {
       description:
-        "Events for you across your threads: messages to you, review requests assigned to you, and lifecycle events (request completed/superseded/cancelled, revision submitted, thread closed). Excludes your own actions. Resumes from your saved inbox cursor unless event_cursor is given. Call ack when done.",
+        "Events for you across your threads: messages to you, review requests assigned to you, and lifecycle events (request completed/superseded/cancelled, revision submitted, thread closed). Excludes your own actions. Resumes from the saved cursor for this workspace or the global inbox unless event_cursor is given. Call ack with the returned ack_scope and event_cursor when done.",
       inputSchema: { workspace: z.string().optional().describe("Limit to one workspace (ID or path)."), event_cursor: eventCursor, limit },
     },
     handle((a: { workspace?: string; event_cursor?: number; limit?: number }) => {
       const pid = me().participantId;
       const workspaceId = a.workspace ? resolveWorkspace(store, a.workspace, cwd).id : undefined;
-      const after = a.event_cursor ?? store.getCursors(pid).inbox ?? 0;
-      return { ...store.listVisibleEvents(pid, { afterSeq: after, workspaceId, limit: a.limit }), acked_cursor: store.getCursors(pid).inbox ?? 0 };
+      const scope = workspaceId ? `workspace:${workspaceId}` : "inbox";
+      const acked = store.getCursors(pid)[scope] ?? 0;
+      const after = a.event_cursor ?? acked;
+      return {
+        ...store.listVisibleEvents(pid, { afterSeq: after, workspaceId, limit: a.limit }),
+        ack_scope: scope,
+        acked_cursor: acked,
+      };
     }),
   );
 
   server.registerTool(
     "wait_for_messages",
     {
-      description: `Block until there is a new event for you (in your inbox, or in one thread), or until the timeout (default ${DEFAULT_WAIT_S}s). Returns status "events" or "timeout"; on timeout just call again if you still want to wait.`,
+      description: `Block until there is a new event for you (in your inbox, or in one thread), or until the timeout (default ${DEFAULT_WAIT_S}s). Returns status "events" or "timeout" and the matching ack_scope; use it with ack after handling the events. On timeout just call again if you still want to wait.`,
       inputSchema: {
         thread_id: z.string().optional().describe("Wait on one thread instead of your whole inbox."),
         workspace: z.string().optional(),
@@ -446,17 +453,17 @@ export function createServer(store: Store, opts: ServerOptions = {}): { server: 
       const pid = me().participantId;
       const workspaceId = a.workspace ? resolveWorkspace(store, a.workspace, cwd).id : undefined;
       const cursors = store.getCursors(pid);
-      const after =
-        a.event_cursor ?? (a.thread_id ? (cursors[`thread:${a.thread_id}`] ?? 0) : (cursors.inbox ?? 0));
+      const scope = a.thread_id ? `thread:${a.thread_id}` : workspaceId ? `workspace:${workspaceId}` : "inbox";
+      const after = a.event_cursor ?? cursors[scope] ?? 0;
       const timeoutMs = Math.min(a.timeout_s ?? DEFAULT_WAIT_S, maxWaitS) * 1000;
       const deadline = Date.now() + timeoutMs;
       // Poll durable state: separate stdio processes can't share in-memory notifications.
       for (;;) {
         const page = store.listVisibleEvents(pid, { afterSeq: after, threadId: a.thread_id, workspaceId });
-        if (page.events.length > 0) return { status: "events", ...page };
-        if (signal?.aborted) return { status: "cancelled", events: [], event_cursor: after, has_more: false };
+        if (page.events.length > 0) return { status: "events", ...page, ack_scope: scope };
+        if (signal?.aborted) return { status: "cancelled", events: [], event_cursor: after, has_more: false, ack_scope: scope };
         const remaining = deadline - Date.now();
-        if (remaining <= 0) return { status: "timeout", events: [], event_cursor: after, has_more: false };
+        if (remaining <= 0) return { status: "timeout", events: [], event_cursor: after, has_more: false, ack_scope: scope };
         await sleep(Math.min(pollMs, remaining), signal);
       }
     }),
@@ -466,14 +473,16 @@ export function createServer(store: Store, opts: ServerOptions = {}): { server: 
     "ack",
     {
       description:
-        "Save your resume point after handling events. scope is 'inbox' or a thread ID. Cursors never move backward; sessions of the same participant share them.",
+        "Save your resume point after handling events. Pass the response's ack_scope ('inbox', 'workspace:<id>', or 'thread:<id>'); a bare thread ID is also accepted. Each scope is independent. Cursors never move backward; sessions of the same participant share them.",
       inputSchema: {
-        scope: z.string().describe("'inbox' or a thread_id"),
+        scope: z.string().describe("The ack_scope returned by inbox, wait_for_messages, or read_thread; also accepts a bare thread_id."),
         event_cursor: z.number().int().min(0),
       },
     },
     handle((a: { scope: string; event_cursor: number }) => {
-      const scope = a.scope === "inbox" ? "inbox" : `thread:${a.scope.replace(/^thread:/, "")}`;
+      const scope = a.scope === "inbox" || a.scope.startsWith("workspace:")
+        ? a.scope
+        : `thread:${a.scope.replace(/^thread:/, "")}`;
       return { scope, acked_cursor: store.ack(me().participantId, scope, a.event_cursor) };
     }),
   );

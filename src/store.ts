@@ -828,7 +828,7 @@ export class Store {
     const after = opts.afterSeq ?? 0;
     const where = [
       "e.seq > @after",
-      "(e.recipients IS NULL OR EXISTS (SELECT 1 FROM json_each(e.recipients) WHERE value = @pid))",
+      `(e.recipients IS NULL OR EXISTS (SELECT 1 FROM json_each(e.recipients) WHERE value = @pid)${opts.includeOwn ? " OR e.actor_id = @pid" : ""})`,
     ];
     if (!opts.includeOwn) where.push("(e.actor_id IS NULL OR e.actor_id != @pid)");
     if (opts.threadId) where.push("e.thread_id = @thread");
@@ -886,8 +886,8 @@ export class Store {
 
   /** Persist a resume point. Cursors never move backward (spec §5). */
   ack(participantId: string, scope: string, seq: number): number {
-    if (scope !== "inbox" && !/^thread:[0-9A-Z]{26}$/.test(scope)) {
-      throw new CollidrError("invalid_argument", "scope must be 'inbox' or 'thread:<thread_id>'");
+    if (scope !== "inbox" && !/^(thread|workspace):[0-9A-Z]{26}$/.test(scope)) {
+      throw new CollidrError("invalid_argument", "scope must be 'inbox', 'workspace:<workspace_id>', or 'thread:<thread_id>'");
     }
     if (!Number.isInteger(seq) || seq < 0) throw new CollidrError("invalid_argument", "cursor must be a non-negative integer");
     return this.db
@@ -1005,19 +1005,22 @@ export class Store {
   }
 
   threadSummary(threadId: string): ThreadSummary {
-    const thread = this.getThread(threadId);
-    const participants = this.db
-      .prepare("SELECT participant_id, role FROM thread_participants WHERE thread_id = ? ORDER BY participant_id")
-      .all(threadId) as { participant_id: string; role: string }[];
-    const requests = this.listRequests(threadId, thread.current_round);
-    return {
-      thread,
-      participants,
-      latest_revision: this.latestRevision(threadId),
-      current_round_requests: requests,
-      awaiting: requests.filter((r) => r.status === "open").map((r) => r.assignee_id),
-      resolution: this.getResolution(threadId),
-    };
+    // Keep all fields on one WAL snapshot while other processes submit or close.
+    return this.db.transaction(() => {
+      const thread = this.getThread(threadId);
+      const participants = this.db
+        .prepare("SELECT participant_id, role FROM thread_participants WHERE thread_id = ? ORDER BY participant_id")
+        .all(threadId) as { participant_id: string; role: string }[];
+      const requests = this.listRequests(threadId, thread.current_round);
+      return {
+        thread,
+        participants,
+        latest_revision: this.latestRevision(threadId),
+        current_round_requests: requests,
+        awaiting: requests.filter((r) => r.status === "open").map((r) => r.assignee_id),
+        resolution: this.getResolution(threadId),
+      };
+    }).deferred();
   }
 
   listThreads(
