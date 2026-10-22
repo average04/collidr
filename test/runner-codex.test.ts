@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { realpathSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function setup(scenario = "complete") {
-  const directory = mkdtempSync(join(tmpdir(), "collidr-codex-test-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "collidr-codex-test-")));
   directories.push(directory);
   const capture = join(directory, "wire.jsonl");
   const controller = new AbortController();
