@@ -302,4 +302,99 @@ describe("Claude ↔ Codex review over MCP (acceptance, spec §9)", () => {
     expect(Date.now() - t0).toBeLessThan(2000);
     await a.close();
   });
+
+  it.each(["inbox", "wait_for_messages"])("%s acknowledges only the selected workspace across restarts", async (tool) => {
+    const author = await connect(`scoped-author-${tool}`, "none");
+    let reviewer = await connect(`scoped-reviewer-${tool}`, "none");
+    const otherRepo = join(dir, `other-${tool}`);
+    mkdirSync(join(otherRepo, ".git"), { recursive: true });
+    try {
+      await reviewer.call("whoami");
+      const open = (workspace: string, label: string) => author.call("open_thread", {
+        workspace,
+        idempotency_key: `open:${label}`,
+        type: "plan_review",
+        title: label,
+        reviewers: [`scoped-reviewer-${tool}`],
+        content_type: "plan",
+        content: "Review this plan",
+      });
+      const older = await open(otherRepo, "older");
+      const newer = await open(repo, "newer");
+      const args = tool === "wait_for_messages" ? { timeout_s: 0 } : {};
+      const page = await reviewer.call(tool, { workspace: repo, ...args });
+      expect(page.events.map((e: any) => e.thread_id)).toEqual([newer.thread_id, newer.thread_id]);
+
+      // The fallback exercises the old protocol too: its global ack loses the older request.
+      await reviewer.call("ack", { scope: page.ack_scope ?? "inbox", event_cursor: page.event_cursor });
+      const other = await reviewer.call(tool, { workspace: otherRepo, ...args });
+      expect(other.events.map((e: any) => e.thread_id)).toEqual([older.thread_id, older.thread_id]);
+      expect(page.ack_scope).toBe(`workspace:${page.events[0].workspace_id}`);
+      expect(other.ack_scope).toBe(`workspace:${other.events[0].workspace_id}`);
+
+      // A stale acknowledgment cannot move this workspace's saved cursor backward.
+      const stale = await reviewer.call("ack", { scope: page.ack_scope, event_cursor: page.events[0].seq });
+      expect(stale.acked_cursor).toBe(page.event_cursor);
+      await reviewer.close();
+      reviewer = await connect(`scoped-reviewer-${tool}`, "none");
+      const resumed = await reviewer.call("inbox", { workspace: page.events[0].workspace_id });
+      expect(resumed.events).toEqual([]);
+      expect(resumed.acked_cursor).toBe(page.event_cursor);
+      expect(resumed.ack_scope).toBe(page.ack_scope);
+      const idle = await reviewer.call("wait_for_messages", { workspace: repo, timeout_s: 0 });
+      expect(idle.status).toBe("timeout");
+      expect(idle.ack_scope).toBe(page.ack_scope);
+      const pending = await reviewer.call("wait_for_messages", { workspace: otherRepo, timeout_s: 0 });
+      expect(pending.status).toBe("events");
+      expect(pending.events.map((e: any) => e.thread_id)).toEqual([older.thread_id, older.thread_id]);
+
+      const global = await reviewer.call("inbox");
+      expect(global.ack_scope).toBe("inbox");
+      expect(global.acked_cursor).toBe(0);
+      expect(global.events.some((e: any) => e.thread_id === older.thread_id)).toBe(true);
+      await reviewer.call("ack", { scope: global.ack_scope, event_cursor: global.event_cursor });
+      const scopedAfterGlobalAck = await reviewer.call("inbox", { workspace: otherRepo });
+      expect(scopedAfterGlobalAck.events.map((e: any) => e.thread_id)).toEqual([older.thread_id, older.thread_id]);
+      const replay = await reviewer.call("inbox", { workspace: repo, event_cursor: 0, limit: 1 });
+      expect(replay.events).toHaveLength(1);
+      expect(replay.has_more).toBe(true);
+      const next = await reviewer.call("inbox", { workspace: repo, event_cursor: replay.event_cursor });
+      expect(next.events.map((e: any) => e.type)).toEqual(["request_created"]);
+      expect(next.has_more).toBe(false);
+    } finally {
+      await reviewer.close();
+      await author.close();
+    }
+  });
+
+  it("keeps thread acknowledgments independent when a wait also specifies a workspace", async () => {
+    const author = await connect("thread-scope-author", "none");
+    const reviewer = await connect("thread-scope-reviewer", "none");
+    try {
+      await reviewer.call("whoami");
+      const opened = await author.call("open_thread", {
+        idempotency_key: "open:thread-scope",
+        type: "plan_review",
+        title: "Thread scope",
+        reviewers: ["thread-scope-reviewer"],
+        content_type: "plan",
+        content: "Review this plan",
+      });
+      const waiting = await reviewer.call("wait_for_messages", { thread_id: opened.thread_id, workspace: repo, timeout_s: 0 });
+      expect(waiting.ack_scope).toBe(`thread:${opened.thread_id}`);
+      // Keep accepting the existing bare-thread-ID form as well as canonical scopes.
+      await reviewer.call("ack", { scope: opened.thread_id, event_cursor: waiting.event_cursor });
+      const idle = await reviewer.call("wait_for_messages", { thread_id: opened.thread_id, timeout_s: 0 });
+      expect(idle.status).toBe("timeout");
+      expect(idle.ack_scope).toBe(waiting.ack_scope);
+      const history = await reviewer.call("read_thread", { thread_id: opened.thread_id });
+      expect(history.ack_scope).toBe(waiting.ack_scope);
+      const inbox = await reviewer.call("inbox", { workspace: repo });
+      expect(inbox.events).toHaveLength(2);
+      expect(inbox.acked_cursor).toBe(0);
+    } finally {
+      await reviewer.close();
+      await author.close();
+    }
+  });
 });
