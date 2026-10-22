@@ -32,8 +32,214 @@ function scheduler(run: (context: AgentContext) => ReturnType<AgentAdapter["run"
 function comment(actor: "claude" | "codex", threadId: string) {
   hub.store.post(hub[actor], { idempotencyKey: key(), threadId, kind: "comment", body: "Reviewed the current request." });
 }
+function question(threadId: string) {
+  return hub.store.post(hub.codex, { idempotencyKey: key(), threadId, kind: "question", body: "Should negative values be supported?" });
+}
+function approve(opened: ReturnType<typeof review>, actor = hub.codex, requestId = opened.request_ids[0]) {
+  hub.store.post(actor, { idempotencyKey: key(), threadId: opened.thread_id, kind: "verdict", verdict: "approve", body: "Approved", responseRequestId: requestId });
+}
 
 describe("managed participation scheduling", () => {
+  it("waits for all required approvals and wakes the author once for the final approval", async () => {
+    config.agents = [config.agents[0]!];
+    const opened = hub.store.openThread(hub.claude, {
+      idempotencyKey: key(), workspaceId: hub.workspaceId, type: "diff_review", title: "Two reviewers",
+      reviewers: [hub.codex.participantId, hub.gemini.participantId], contentType: "patch", content: PATCH_R1,
+    });
+    let calls = 0;
+    const runner = scheduler(async () => {
+      calls++;
+      hub.store.resolve(hub.claude, { idempotencyKey: key(), threadId: opened.thread_id, expectedRevisionId: opened.revision_id, outcome: "resolved", summary: "Both approved" });
+      return { status: "completed", output: "Resolved" };
+    });
+    const requests = hub.store.listRequests(opened.thread_id);
+    approve(opened, hub.codex, requests.find(r => r.assignee_id === hub.codex.participantId)!.id);
+    expect(await runner.tick()).toBe(false);
+    expect(state.getAgent(config.workspace, hub.claude.participantId).blockedReason).toBeNull();
+    approve(opened, hub.gemini, requests.find(r => r.assignee_id === hub.gemini.participantId)!.id);
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it("delivers request_changes immediately even while another required review remains open", async () => {
+    config.agents = [config.agents[0]!];
+    const opened = hub.store.openThread(hub.claude, {
+      idempotencyKey: key(), workspaceId: hub.workspaceId, type: "diff_review", title: "Two reviewers",
+      reviewers: [hub.codex.participantId, hub.gemini.participantId], contentType: "patch", content: PATCH_R1,
+    });
+    const request = hub.store.listRequests(opened.thread_id).find(r => r.assignee_id === hub.codex.participantId)!;
+    hub.store.post(hub.codex, { idempotencyKey: key(), threadId: opened.thread_id, kind: "verdict", verdict: "request_changes", body: "Add coverage", responseRequestId: request.id });
+    const runner = scheduler(async () => {
+      hub.store.submitRevision(hub.claude, { idempotencyKey: key(), threadId: opened.thread_id, contentType: "patch", content: PATCH_R1 + "\n// coverage added" });
+      return { status: "completed", output: "Revised" };
+    });
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(false);
+  });
+
+  it("does not wake a completed reviewer for FYI comments but delivers directed comments and questions", async () => {
+    config.agents = [config.agents[1]!];
+    const opened = review();
+    approve(opened);
+    comment("claude", opened.thread_id);
+    let calls = 0;
+    const runner = scheduler(async () => { calls++; comment("codex", opened.thread_id); return { status: "completed", output: "Answered" }; });
+    expect(await runner.tick()).toBe(false);
+    hub.store.post(hub.claude, { idempotencyKey: key(), threadId: opened.thread_id, kind: "comment", body: "Please confirm the release note", recipients: [hub.codex.participantId] });
+    expect(await runner.tick()).toBe(true);
+    hub.store.post(hub.claude, { idempotencyKey: key(), threadId: opened.thread_id, kind: "question", body: "One more detail?" });
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  it("blocks partial review notes until the assigned request is completed or a meaningful question is posted", async () => {
+    config.agents = [config.agents[1]!];
+    const opened = review();
+    let finish = false;
+    const runner = scheduler(async () => {
+      if (finish) approve(opened); else comment("codex", opened.thread_id);
+      return { status: "completed", output: "Posted" };
+    });
+    expect(await runner.tick()).toBe(true);
+    expect(state.getAgent(config.workspace, hub.codex.participantId).blockedReason).toMatch(/request|review/i);
+    expect(hub.store.getRequest(opened.request_ids[0]!).status).toBe("open");
+    expect(await runner.tick()).toBe(false);
+    finish = true;
+    state.retry(config.workspace, hub.codex.participantId);
+    expect(await runner.tick()).toBe(true);
+    expect(hub.store.getRequest(opened.request_ids[0]!).status).toBe("completed");
+    expect(state.getAgent(config.workspace, hub.codex.participantId).blockedReason).toBeNull();
+  });
+
+  it.each(["contextual", "reply_to"])("preserves an author's %s answer to an outstanding review question", async (kind) => {
+    config.agents = [config.agents[1]!];
+    const opened = review();
+    let calls = 0;
+    let questionId = "";
+    const runner = scheduler(async () => {
+      if (++calls === 1) questionId = question(opened.thread_id).message_id;
+      else approve(opened);
+      return { status: "completed", output: "Posted" };
+    });
+    expect(await runner.tick()).toBe(true);
+    hub.store.post(hub.claude, { idempotencyKey: key(), threadId: opened.thread_id, kind: "comment", body: "Yes, negatives are supported.", ...(kind === "reply_to" ? { replyTo: questionId } : {}) });
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(false);
+    expect(hub.store.getRequest(opened.request_ids[0]!).status).toBe("completed");
+  });
+
+  it("requires author progress after the final verdict even though no review requests remain open", async () => {
+    config.agents = [config.agents[0]!];
+    const opened = review();
+    approve(opened);
+    const runner = scheduler(async () => ({ status: "completed", output: "All reviews done" }));
+    expect(await runner.tick()).toBe(true);
+    expect(state.getAgent(config.workspace, hub.claude.participantId).blockedReason).toMatch(/progress/i);
+    expect(hub.store.getThread(opened.thread_id).status).toBe("open");
+  });
+
+  it("coalesces already-completed required reviews without jumping over an interleaved thread", async () => {
+    config.agents = [config.agents[0]!];
+    const first = hub.store.openThread(hub.claude, {
+      idempotencyKey: key(), workspaceId: hub.workspaceId, type: "diff_review", title: "Two reviewers",
+      reviewers: [hub.codex.participantId, hub.gemini.participantId], contentType: "patch", content: PATCH_R1,
+    });
+    const second = review();
+    const requests = hub.store.listRequests(first.thread_id);
+    approve(first, hub.codex, requests.find(r => r.assignee_id === hub.codex.participantId)!.id);
+    approve(second);
+    approve(first, hub.gemini, requests.find(r => r.assignee_id === hub.gemini.participantId)!.id);
+    const handled: string[] = [];
+    const runner = scheduler(async context => {
+      const target = context.prompt.includes(second.thread_id) ? second : first;
+      handled.push(target.thread_id);
+      hub.store.resolve(hub.claude, { idempotencyKey: key(), threadId: target.thread_id, expectedRevisionId: target.revision_id, outcome: "resolved", summary: "Approved" });
+      return { status: "completed", output: "Resolved" };
+    });
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(false);
+    expect(handled).toEqual([second.thread_id, first.thread_id]);
+  });
+
+  it("uses one canonical author wakeup when a verdict and request completion straddle event pages", async () => {
+    config.agents = [config.agents[0]!];
+    const opened = review();
+    // Two thread lifecycle events + 197 own comments + verdict = a full page.
+    for (let i = 0; i < 197; i++) comment("claude", opened.thread_id);
+    approve(opened);
+    let calls = 0;
+    const runner = scheduler(async () => {
+      calls++;
+      hub.store.resolve(hub.claude, { idempotencyKey: key(), threadId: opened.thread_id, expectedRevisionId: opened.revision_id, outcome: "resolved", summary: "Approved" });
+      return { status: "completed", output: "Resolved" };
+    });
+    expect(await runner.tick()).toBe(false);
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it("accepts a no-op only when the delivered review became stale during the invocation", async () => {
+    config.agents = [config.agents[1]!];
+    const opened = review();
+    let calls = 0;
+    const runner = scheduler(async () => {
+      calls++;
+      if (calls === 1) hub.store.submitRevision(hub.claude, { idempotencyKey: key(), threadId: opened.thread_id, contentType: "patch", content: PATCH_R1 + "\n// supersedes" });
+      else {
+        const request = hub.store.threadSummary(opened.thread_id).current_round_requests[0]!;
+        approve(opened, hub.codex, request.id);
+      }
+      return { status: "completed", output: "Request changed while reading" };
+    });
+    expect(await runner.tick()).toBe(true);
+    expect(state.getAgent(config.workspace, hub.codex.participantId).blockedReason).toBeNull();
+    expect(await runner.tick()).toBe(true);
+    expect(await runner.tick()).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  it("parks budget-exhausted thread work across restarts while servicing another thread, then retries without duplicates", async () => {
+    config.agents = [config.agents[1]!];
+    config.maxTurnsPerThread = 1;
+    const first = review();
+    const seen: string[] = [];
+    const runner = scheduler(async () => { seen.push(first.thread_id); question(first.thread_id); return { status: "completed", output: "Asked" }; });
+    expect(await runner.tick()).toBe(true);
+    comment("claude", first.thread_id);
+    const second = review();
+    const resumed = scheduler(async (context) => {
+      const target = context.prompt.includes(second.thread_id) ? second : first;
+      seen.push(target.thread_id);
+      approve(target);
+      return { status: "completed", output: "Approved" };
+    });
+    expect(await resumed.tick()).toBe(true);
+    expect(seen).toEqual([first.thread_id, second.thread_id]);
+    expect(state.getAgent(config.workspace, hub.codex.participantId).blockedReason).toBeNull();
+    expect(state.status(config.workspace).deferredThreads).toEqual([expect.objectContaining({ agentId: hub.codex.participantId, threadId: first.thread_id, blockedReason: expect.stringMatching(/budget/i) })]);
+    state.close(); state = new RunnerState(hub.file);
+    expect(state.getBudget(config.workspace, first.thread_id)).toBe(1);
+    const oldCursor = state.getAgent(config.workspace, hub.codex.participantId).cursor;
+    state.retry(config.workspace, hub.codex.participantId);
+    const restarted = scheduler(async (context) => {
+      expect(context.prompt).toContain(first.thread_id);
+      seen.push(first.thread_id); approve(first);
+      return { status: "completed", output: "Approved" };
+    });
+    expect(await restarted.tick()).toBe(false);
+    state.retry(config.workspace, hub.codex.participantId, first.thread_id, 1);
+    expect(state.getAgent(config.workspace, hub.codex.participantId).cursor).toBeGreaterThanOrEqual(oldCursor);
+    expect(await restarted.tick()).toBe(true);
+    expect(await restarted.tick()).toBe(false);
+    expect(seen).toEqual([first.thread_id, second.thread_id, first.thread_id]);
+    expect(state.getBudget(config.workspace, first.thread_id)).toBe(2);
+    expect(state.status(config.workspace).deferredThreads).toEqual([]);
+  });
+
   it("automatically completes task -> author request -> reviewer approval -> author resolution in three invocations", async () => {
     let opened: ReturnType<typeof review>;
     const seen: string[] = [];
@@ -88,7 +294,7 @@ describe("managed participation scheduling", () => {
     let calls = 0;
     const runner = scheduler(async () => {
       calls++;
-      comment("codex", opened.thread_id);
+      if (calls === 1) question(opened.thread_id); else approve(opened);
       if (calls === 1) comment("claude", opened.thread_id);
       return { status: "completed", output: "Posted" };
     });
@@ -109,7 +315,7 @@ describe("managed participation scheduling", () => {
       calls++;
       expect(context.prompt).toContain(newer.request_ids[0]);
       expect(context.prompt).not.toContain(opened.request_ids[0]);
-      comment("codex", opened.thread_id);
+      hub.store.post(hub.codex, { idempotencyKey: key(), threadId: opened.thread_id, kind: "verdict", verdict: "approve", body: "Approved", responseRequestId: newer.request_ids[0] });
       return { status: "completed", output: "Done" };
     });
     expect(await runner.tick()).toBe(true);
@@ -123,7 +329,7 @@ describe("managed participation scheduling", () => {
     let progress = false;
     const runner = scheduler(async (context) => {
       context.onSession("resume-me");
-      if (progress) comment("codex", opened.thread_id);
+      if (progress) approve(opened);
       return { status: "completed", output: "Only a final answer" };
     });
     expect(await runner.tick()).toBe(true);
@@ -230,14 +436,15 @@ describe("managed participation scheduling", () => {
     config.maxTurnsPerThread = 1;
     const opened = review();
     const runner = scheduler(async () => {
-      comment("codex", opened.thread_id);
+      question(opened.thread_id);
       return { status: "completed", output: "Done" };
     });
     expect(await runner.tick()).toBe(true);
     comment("claude", opened.thread_id);
     const restarted = scheduler(async () => { throw new Error("Budget must prevent this call"); });
     expect(await restarted.tick()).toBe(false);
-    expect(state.getAgent(config.workspace, hub.codex.participantId).blockedReason).toMatch(/budget|limit/i);
+    expect(state.getAgent(config.workspace, hub.codex.participantId).blockedReason).toBeNull();
+    expect(state.status(config.workspace).deferredThreads[0]?.blockedReason).toMatch(/budget|limit/i);
   });
 
   it("continues past a page of lifecycle events on later ticks", async () => {
@@ -249,7 +456,7 @@ describe("managed participation scheduling", () => {
     const opened = review();
     const runner = scheduler(async (context) => {
       expect(context.prompt).toContain(opened.thread_id);
-      comment("codex", opened.thread_id);
+      approve(opened);
       return { status: "completed", output: "Done" };
     });
     expect(await runner.tick()).toBe(false);

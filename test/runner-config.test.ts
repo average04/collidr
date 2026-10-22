@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig, createConfig, writeConfig } from "../src/runner/config.js";
@@ -43,6 +43,26 @@ describe("runner configuration", () => {
     writeConfig(file, config);
     expect(() => writeConfig(file, config)).toThrow();
     expect(loadConfig(file).agents.map(a => a.id)).toEqual(config.agents.map(a => a.id));
+  });
+  it("scopes generated read grants to the canonical workspace without granting Glob or Grep globally", () => {
+    const { dir } = setup();
+    const workspace = join(dir, "repo [literal], (team) ! # &");
+    mkdirSync(join(workspace, ".git"), { recursive: true });
+    const nested = join(workspace, "src"); mkdirSync(nested);
+    const alias = join(dir, "alias"); symlinkSync(workspace, alias, process.platform === "win32" ? "junction" : "dir");
+    const config = createConfig(join(alias, "src"), join(dir, "cli.js"), join(dir, "hub.db"));
+    const canonical = realpathSync.native(workspace);
+    expect(config.workspace).toBe(process.platform === "win32" ? canonical.toLowerCase() : canonical);
+    for (const agent of config.agents) {
+      expect(agent.allowedTools).toEqual(["mcp__collidr__*", "Read(/**)"]);
+    }
+  });
+  it("preserves explicit tool grants when loading an existing config", () => {
+    const { file, value } = setup();
+    const allowedTools = ["Read", "Glob", "Grep", "Read(//other/location/**)", "Bash(git diff *)"];
+    value.agents[0]!.allowedTools = allowedTools;
+    writeFileSync(file, JSON.stringify(value));
+    expect(loadConfig(file).agents[0]!.allowedTools).toEqual(allowedTools);
   });
   it("loads control coordinates when launch paths are unavailable", () => {
     const { file, value, dir } = setup();

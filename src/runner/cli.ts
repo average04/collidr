@@ -12,7 +12,8 @@ import { CodexAdapter } from "./codex.js";
 import { createConfig, loadConfig, runnerLogPath, writeConfig } from "./config.js";
 import { terminateChild } from "./process.js";
 import { RunnerScheduler } from "./scheduler.js";
-import { processAlive, RunnerState } from "./state.js";
+import { RunnerState } from "./state.js";
+import { processMatchesIdentity } from "./process-identity.js";
 import type { RunnerConfig } from "./types.js";
 
 const HELP = `collidr runner — automatic handoffs using dedicated background sessions
@@ -22,12 +23,14 @@ const HELP = `collidr runner — automatic handoffs using dedicated background s
   runner task --config FILE --agent ID --prompt TEXT
   runner task --config FILE --agent ID --prompt-file FILE
   runner status --config FILE
-  runner retry --config FILE --agent ID
+  runner retry --config FILE --agent ID [--thread ID]
   runner stop --config FILE
 
 Start once, then submit a task to claude-managed. Reviews go to codex-managed.
 The runner pauses on permissions, failures, or lack of Collidr progress.
 Status includes the reason; retry explicitly resumes the pending delivery.
+Thread budget pauses are listed separately and do not stop other threads.
+Retry with --thread grants one more configured invocation allowance for that thread.
 Your interactive Claude and Codex chats remain separate.
 `;
 
@@ -108,7 +111,7 @@ export async function runnerMain(argv: string[]): Promise<number> {
   if (!command || ["help", "--help", "-h"].includes(command)) { process.stdout.write(HELP); return 0; }
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
     config: { type: "string" }, workspace: { type: "string" }, database: { type: "string" },
-    agent: { type: "string" }, prompt: { type: "string" }, "prompt-file": { type: "string" },
+    agent: { type: "string" }, thread: { type: "string" }, prompt: { type: "string" }, "prompt-file": { type: "string" },
     background: { type: "boolean" }, help: { type: "boolean", short: "h" },
   } });
   if (values.help) { process.stdout.write(HELP); return 0; }
@@ -145,15 +148,17 @@ export async function runnerMain(argv: string[]): Promise<number> {
       }
       case "retry":
         if (!config.agents.some(a => a.id === values.agent)) throw new Error("--agent must name a configured participant");
-        state.retry(config.workspace, values.agent!);
-        process.stdout.write(`Retry enabled for ${values.agent}\n`);
+        state.retry(config.workspace, values.agent!, values.thread, values.thread ? config.maxTurnsPerThread : undefined);
+        process.stdout.write(values.thread
+          ? `Retry enabled for ${values.agent} on thread ${values.thread}; granted ${config.maxTurnsPerThread} additional invocations.\n`
+          : `Retry enabled for ${values.agent}; parked thread budgets require --thread ID.\n`);
         return 0;
       case "stop": {
         state.requestStop(config.workspace);
         const deadline = Date.now() + 30000;
         while (state.status(config.workspace).lease && Date.now() < deadline) await sleep(100);
         if (state.status(config.workspace).lease) throw new Error("Stop requested, but the runner has not released its lease. Inspect status and log before restarting.");
-        if (state.status(config.workspace).agents.some(agent => agent.active?.childPid && processAlive(agent.active.childPid))) {
+        if (state.status(config.workspace).agents.some(agent => agent.active?.childPid && processMatchesIdentity(agent.active.childPid, agent.active.childIdentity))) {
           throw new Error("Supervisor stopped, but an owned child is still exiting. Inspect status before restarting.");
         }
         process.stdout.write("Runner stopped.\n");

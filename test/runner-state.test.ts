@@ -18,13 +18,13 @@ function expireLease() {
 describe("durable runner state", () => {
   it("refuses newer sidecar schemas without changing their tables", () => {
     const db = new Database(`${hub.file}.runner.db`);
-    db.pragma("user_version = 2");
+    db.pragma("user_version = 999");
     db.exec("CREATE TABLE future_state (value TEXT)");
     db.close();
     expect(() => open()).toThrow(/newer|version/i);
     const check = new Database(`${hub.file}.runner.db`);
     try {
-      expect(check.pragma("user_version", { simple: true })).toBe(2);
+      expect(check.pragma("user_version", { simple: true })).toBe(999);
       expect(check.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()).toEqual([{ name: "future_state" }]);
     } finally { check.close(); }
   });
@@ -125,8 +125,52 @@ describe("durable runner state", () => {
     state.finishRun(workspace, "a", run.id, { status: "completed", output: "done" });
     const second = open();
     expect(second.beginRun(workspace, "b", { taskId: null, threadId: "thread", eventSeq: 2 }, 1)).toBeNull();
-    expect(second.getAgent(workspace, "b").blockedReason).toMatch(/budget|limit/i);
+    expect(second.getAgent(workspace, "b").blockedReason).toBeNull();
+    expect(second.status(workspace).deferredThreads).toEqual([expect.objectContaining({ agentId: "b", threadId: "thread", blockedReason: expect.stringMatching(/budget|limit/i) })]);
     expect(second.getBudget(workspace, "thread")).toBe(1);
+  });
+
+  it("grants an explicit bounded retry without resetting accounting, rewinding cursors, or requeuing tasks", () => {
+    const state = open();
+    state.ensureAgent(workspace, "a");
+    state.addBudget(workspace, "thread");
+    expect(state.beginRun(workspace, "a", { taskId: null, threadId: "thread", eventSeq: 4 }, 1)).toBeNull();
+    state.advance(workspace, "a", 20);
+    const queued = state.enqueue(workspace, "a", "Another task");
+    expect(() => state.retry(workspace, "a", "missing", 1)).toThrow(/parked|deferred|thread/i);
+    state.retry(workspace, "a", "thread", 1);
+    expect(state.getAgent(workspace, "a").cursor).toBe(20);
+    expect(state.getBudget(workspace, "thread")).toBe(1);
+    expect(state.status(workspace).budgets).toEqual([{ threadId: "thread", invocations: 1, additionalInvocations: 1 }]);
+    expect(state.status(workspace).tasks).toEqual([expect.objectContaining({ id: queued, status: "queued" })]);
+    const second = open();
+    const active = second.beginRun(workspace, "a", { taskId: null, threadId: "thread", eventSeq: 4, deferredThread: true }, 1)!;
+    expect(active).not.toBeNull();
+    second.finishRun(workspace, "a", active.id, { status: "completed", output: "Done" });
+    expect(second.status(workspace).deferredThreads).toEqual([]);
+    expect(second.getAgent(workspace, "a").cursor).toBe(20);
+    expect(second.beginRun(workspace, "a", { taskId: null, threadId: "thread", eventSeq: 22 }, 1)).toBeNull();
+    expect(second.getBudget(workspace, "thread")).toBe(2);
+  });
+
+  it("migrates v1 budget blocks into durable per-thread work while preserving sessions and queued tasks", () => {
+    const state = open();
+    state.ensureAgent(workspace, "a");
+    const taskId = state.enqueue(workspace, "a", "Keep queued");
+    state.addBudget(workspace, "thread");
+    state.advance(workspace, "a", 7);
+    const db = new Database(`${hub.file}.runner.db`);
+    db.prepare("UPDATE runner_agents SET blocked_reason = ?, session_id = 'saved-session' WHERE agent_id = 'a'").run("Thread thread reached its 1-invocation budget.");
+    db.exec("DROP TABLE IF EXISTS runner_thread_work");
+    if ((db.pragma("table_info(runner_budgets)") as { name: string }[]).some(column => column.name === "additional_invocations")) db.exec("ALTER TABLE runner_budgets DROP COLUMN additional_invocations");
+    if ((db.pragma("table_info(runner_leases)") as { name: string }[]).some(column => column.name === "process_identity")) db.exec("ALTER TABLE runner_leases DROP COLUMN process_identity");
+    db.pragma("user_version = 1"); db.close();
+    state.close();
+    const migrated = open();
+    expect(migrated.getAgent(workspace, "a")).toMatchObject({ cursor: 7, sessionId: "saved-session", blockedReason: null });
+    expect(migrated.getBudget(workspace, "thread")).toBe(1);
+    expect(migrated.pendingTask(workspace, "a")?.id).toBe(taskId);
+    expect(migrated.status(workspace).deferredThreads).toEqual([expect.objectContaining({ agentId: "a", threadId: "thread", fromSeq: 8, throughSeq: 8, blockedReason: expect.stringMatching(/budget/i) })]);
   });
 
   it("delivers queued tasks in submission order even when their ULID timestamps match", () => {

@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { RunnerState } from "../src/runner/state.js";
 
 const exec = promisify(execFile);
 const cli = resolve("dist/cli.js");
@@ -54,6 +55,35 @@ describe("runner CLI", () => {
     await expect(run("start", "--config", file, "--background")).rejects.toThrow();
     await run("stop", "--config", file);
     expect(JSON.parse((await run("status", "--config", file)).stdout).lease).toBeNull();
+  });
+  it("retries only the selected parked thread with a visible additional invocation allowance", async () => {
+    const { file } = await setup();
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    config.maxTurnsPerThread = 1;
+    writeFileSync(file, JSON.stringify(config));
+    const state = new RunnerState(config.database);
+    try {
+      state.ensureAgent(config.workspace, "codex-managed");
+      for (const threadId of ["first", "second"]) {
+        state.addBudget(config.workspace, threadId);
+        expect(state.beginRun(config.workspace, "codex-managed", { taskId: null, threadId, eventSeq: threadId === "first" ? 4 : 7 }, 1)).toBeNull();
+      }
+      state.advance(config.workspace, "codex-managed", 12);
+    } finally { state.close(); }
+    await run("retry", "--config", file, "--agent", "codex-managed");
+    let status = JSON.parse((await run("status", "--config", file)).stdout);
+    expect(status.deferredThreads.every((item: any) => item.blockedReason)).toBe(true);
+    const retried = await run("retry", "--config", file, "--agent", "codex-managed", "--thread", "first");
+    expect(retried.stdout).toMatch(/first.*1|1.*first/i);
+    status = JSON.parse((await run("status", "--config", file)).stdout);
+    expect(status.agents[0].cursor).toBe(12);
+    expect(status.deferredThreads.find((item: any) => item.threadId === "first").blockedReason).toBeNull();
+    expect(status.deferredThreads.find((item: any) => item.threadId === "second").blockedReason).toMatch(/budget/i);
+    expect(status.budgets).toEqual([
+      { threadId: "first", invocations: 1, additionalInvocations: 1 },
+      { threadId: "second", invocations: 1, additionalInvocations: 0 },
+    ]);
+    await expect(run("retry", "--config", file, "--agent", "codex-managed", "--thread", "missing")).rejects.toThrow();
   });
   it("a failed provider pauses the task and does not automatically relaunch", async () => {
     const { dir, file } = await setup();

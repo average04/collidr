@@ -62,7 +62,11 @@ export function createConfig(workspace: string, cliPath: string, database = defa
       instructions: provider === "claude"
         ? "Implement the assigned task, then request a review from codex-managed using Collidr. Address feedback and submit a new revision. Resolve the thread when approved."
         : "Review the assigned Collidr revision carefully, inspect relevant files, and post a verdict responding to the current request. Give concrete findings with evidence.",
-      allowedTools: ["mcp__collidr__*", "Read", "Glob", "Grep"], maxTurns: 20,
+      // CLI /path rules anchor at the primary working directory, which the
+      // adapter sets to the canonical workspace. Keeping the path out of the
+      // pattern also avoids interpreting Windows paths or glob metacharacters.
+      // Read rules cover file searches; bare Glob/Grep would grant global reads.
+      allowedTools: ["mcp__collidr__*", "Read(/**)"], maxTurns: 20,
     })),
   };
   return configSchema.parse(config);

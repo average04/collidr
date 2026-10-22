@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ClaudeAdapter } from "../src/runner/claude.js";
+import { createConfig } from "../src/runner/config.js";
 import type { AgentContext } from "../src/runner/types.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/fake-claude.mjs", import.meta.url));
@@ -25,6 +26,20 @@ function context(mode = "success", overrides: Partial<AgentContext> = {}): Agent
 }
 
 describe("ClaudeAdapter", () => {
+  it("passes generated workspace-scoped permissions without interpolating special path characters", async () => {
+    const ctx = context();
+    const workspace = join(ctx.workspace, "repo [literal], (team) ! # &");
+    mkdirSync(workspace);
+    const config = createConfig(workspace, ctx.cliPath, ctx.database);
+    ctx.workspace = config.workspace;
+    ctx.agent.allowedTools = config.agents.find(agent => agent.provider === "claude")!.allowedTools;
+    const result = await new ClaudeAdapter().run(ctx);
+    expect(result.status).toBe("completed");
+    const observed = JSON.parse(result.output);
+    expect(observed.cwd.toLowerCase()).toBe(config.workspace.toLowerCase());
+    expect(observed.args[observed.args.indexOf("--allowedTools") + 1]).toBe("mcp__collidr__*,Read(/**)");
+  });
+
   it("passes the prompt through stdin and isolates participant MCP identity, cwd, permissions and turn budget", async () => {
     const ctx = context();
     const sessions: string[] = [];
