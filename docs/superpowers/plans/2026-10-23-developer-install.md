@@ -29,7 +29,7 @@ Files: add `src/runner/discovery.ts`, `src/setup.ts`, `test/provider-discovery.t
 
 ## Task 2: Distributable package, smoke verification, CI, docs
 
-Files: edit `package.json`, `package-lock.json`, `README.md`; add `scripts/package-smoke.mjs`, `.github/workflows/ci.yml`, `docs/releasing.md` as needed.
+Files: edit `package.json`, `package-lock.json`, `README.md`; add `scripts/package-smoke.mjs`, `.github/workflows/ci.yml`, `docs/releasing.md` as needed. Canonicalize temp-path expectations in `test/runner-config.test.ts`, `test/runner-claude.test.ts`, and `test/runner-codex.test.ts` for macOS CI.
 
 1. Add metadata and `prepack` build; preserve runtime-only dist package contents. Check package/version consistency in verification. Do not add an install-time TypeScript build requiring devDependencies.
 2. Build a repeatable `npm run test:package` script that packs to an isolated temporary directory, installs globally into a temporary prefix, executes installed CLI help/doctor, invokes noninteractive setup with isolated fake providers, validates resulting absolute paths/arguments, and performs an MCP initialize/list-tools call against an isolated database. Use npm's JS CLI via Node where Windows wrappers would otherwise require shell execution. Assert LICENSE/README/runtime present and source/test/secret files absent from tarball. Cleanup only the verified temp root.
