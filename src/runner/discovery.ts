@@ -1,4 +1,4 @@
-import { accessSync, constants, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, openSync, readSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Provider } from "./types.js";
@@ -9,7 +9,22 @@ const packages: Record<Provider, string> = { claude: "@anthropic-ai/claude-code"
 function isFile(file: string): boolean { try { return statSync(file).isFile(); } catch { return false; } }
 function native(file: string, platform: NodeJS.Platform): ProviderLaunch | undefined {
   if (!isFile(file)) return undefined;
-  try { if (platform !== "win32") accessSync(file, constants.X_OK); } catch { return undefined; }
+  try {
+    if (platform !== "win32") {
+      accessSync(file, constants.X_OK);
+      // shell:false still follows POSIX shebangs. Only allow known Node entrypoints;
+      // skip every other interpreter rather than maintaining a list of shell names.
+      const fd = openSync(file, "r");
+      const header = Buffer.alloc(4096);
+      let length: number;
+      try { length = readSync(fd, header, 0, header.length, 0); } finally { closeSync(fd); }
+      if (header[0] === 0x23 && header[1] === 0x21) {
+        const interpreter = header.subarray(2, length).toString("utf8").split(/\r?\n/, 1)[0]!.trim();
+        if (!/^(?:(?:\S*\/)?node(?:js)?|(?:\S*\/)?env\s+(?:-S\s+)?node(?:js)?)$/.test(interpreter)) return undefined;
+        return { command: process.execPath, args: [resolve(file)] };
+      }
+    }
+  } catch { return undefined; }
   return { command: resolve(file), args: [] };
 }
 function contained(root: string, file: string): boolean {

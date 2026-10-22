@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { findProviderLaunch } from "../src/runner/discovery.js";
 
 const roots: string[] = [];
@@ -9,6 +9,19 @@ function fixture() { const root = realpathSync.native(mkdtempSync(join(tmpdir(),
 function file(path: string, content = "") { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, content); chmodSync(path, 0o755); return path; }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 describe("provider launch discovery", () => {
+  it.each([
+    "/bin/sh", "/bin/bash -e", "/bin/zsh", "/usr/bin/env sh", "/usr/bin/env bash",
+    "/usr/bin/env -S sh -e", "/usr/bin/env --split-string=bash", "/usr/bin/env FOO=bar sh",
+  ])("skips POSIX wrapper #!%s ahead of native executable", shebang => {
+    const root = fixture(); const wrapperDir = join(root, "wrapper"); const nativeDir = join(root, "native");
+    file(join(wrapperDir, "claude"), `#!${shebang}\nexit 0\n`);
+    const command = file(join(nativeDir, "claude"));
+    expect(findProviderLaunch("claude", { platform: "linux", env: { PATH: [wrapperDir, nativeDir].join(delimiter) }, home: root })).toEqual({ command, args: [] });
+  });
+  it.each(["/usr/bin/env node", "/usr/bin/node", "/usr/bin/env -S node"])("launches POSIX Node entrypoint #!%s through current Node", shebang => {
+    const root = fixture(); const script = file(join(root, "codex"), `#!${shebang}\nconsole.log('fake');\n`);
+    expect(findProviderLaunch("codex", { platform: "linux", env: { PATH: root }, home: root })).toEqual({ command: process.execPath, args: [script] });
+  });
   it.each(["linux", "darwin", "win32"] as const)("prefers native PATH executables on %s", platform => {
     const root = fixture(); const native = file(join(root, platform === "win32" ? "claude.exe" : "claude"));
     expect(findProviderLaunch("claude", { platform, env: { PATH: root }, home: root })).toEqual({ command: native, args: [] });
